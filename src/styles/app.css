@@ -1,0 +1,18 @@
+@import "tailwindcss";
+
+@layer base {
+  html,
+  body {
+    @apply bg-[#0a0c10] text-[#c9d4e3] antialiased;
+  }
+  body {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  ::selection {
+    background: #e5484d33;
+  }
+  input,
+  button {
+    font-family: inherit;
+  }
+}
