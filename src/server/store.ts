@@ -287,6 +287,114 @@ Stub instance exposes the API at a fake endpoint below. Burp project file includ
 1. GET /api/v2/invoices/8999 with your own bearer token returns another tenant's invoice — no ownership check (BOLA). Flag 1 is in the \`notes\` field.
 2. POST /api/v2/admin/export with \`{"role":"admin"}\` bypasses the middleware check; export any invoice including the admin seed record holding flag 2.`,
     },
+    {
+      slug: "shadow-ledger",
+      title: "Shadow Ledger",
+      category: "Cloud",
+      difficulty: "Medium",
+      author: "crimson-author",
+      descriptionMd: `## Brief
+
+A regional payments operator left a **publicly readable backup bucket** (\`shadow-ledger-backups\`) attached to its billing environment. Inside it, a rotated IAM access-key pair was archived in plaintext — the keys look dead, but the account they belong to still holds \`sts:AssumeRole\` rights over a restricted ledger role.
+
+Your job: enumerate the bucket, recover the archived keys, chain the role assumption, and read the restricted ledger object. Two flags: the recovered key material (flag 1) and the ledger object itself (flag 2).
+
+## Access
+
+Stub instance drops you on a jump box with the AWS CLI preconfigured for an unprivileged profile. No console access — everything happens at the CLI.`,
+      objectives: [
+        "Enumerate the public backup bucket and locate the archived credentials (flag 1)",
+        "Identify the over-permissive role the recovered account can assume",
+        "Assume the target role and read the restricted ledger object (flag 2)",
+        "Document the IAM misconfiguration for the report",
+      ],
+      mitre: [
+        { id: "T1580", tactic: "Discovery" },
+        { id: "T1552", tactic: "Credential Access" },
+      ],
+      cves: [{ id: "CVE-2021-44228", note: "Related reading: the ledger ingestion service runs an unpatched Log4j stack — a live foothold beyond the role boundary if the recovered keys are dead." }],
+      tags: ["cloud", "s3", "iam", "misconfiguration", "aws"],
+      flags: [
+        { id: "f-bucket", name: "flag.bucket — archived credentials recovered", points: 200, flagType: "STATIC", answerHash: hashFlag("CR{pub1ic_buck3t_l3ak3d_k3ys}") },
+        // DYNAMIC seed — value is derived per user at submission time, never stored.
+        { id: "f-ledger", name: "flag.ledger — restricted ledger object read", points: 250, flagType: "DYNAMIC" },
+      ],
+      hints: [
+        { id: "h-1", title: "Start with the bucket list", body: "aws s3 ls will reveal the bucket if it is public. Versioning is enabled — check old object versions before you trust the visible snapshot.", cost: 25 },
+        { id: "h-2", title: "The role is the prize", body: "The recovered account can sts:AssumeRole a role named ledger-reader. Inspect the inline policy on the IAM user, not just the role's trust policy.", cost: 50 },
+      ],
+      artifacts: [
+        { name: "shadow-ledger-openapi.yaml", kind: "API spec", size: "14 KB", url: "#stub" },
+        { name: "iam-policy-dump.json", kind: "Policy", size: "6 KB", url: "#stub" },
+      ],
+      writeupMd: `## Solution — Shadow Ledger
+
+1. \`aws s3 ls shadow-ledger-backups\` — the bucket is public. \`--versions\` lists an old \`ledger-keys.zip\` that the live snapshot hides.
+2. Unzip reveals an archived access-key pair that still maps to an IAM user with \`sts:AssumeRole\` on \`arn:aws:iam::*:role/ledger-reader\`.
+3. \`aws sts assume-role\` with the recovered credentials, then \`aws s3 cp s3://shadow-ledger/restricted/ledger.json -\` under the assumed role prints flag 2.`,
+    },
+    {
+      slug: "crimson-line",
+      title: "Crimson Line",
+      category: "Kill-Chain",
+      difficulty: "Hard",
+      author: "crimson-author",
+      descriptionMd: `## Brief
+
+The Crimson Line is a **single continuous attack path** across five network segments — no standalone objectives, every stage unlocks the next.
+
+1. **Phish** — a spear-phish email with a credential-harvesting link lands in a victim mailbox.
+2. **Web shell** — the harvested password is reused against the legacy public portal's admin console.
+3. **Pivot** — the portal box is dual-homed; a stale SSH key on it opens the internal workstation segment.
+4. **Privesc** — the workstation user belongs to a delegated AD group; abuse the delegation to reach Domain Admin.
+5. **Exfil** — pull the crown-jewel share out through the pivot.
+
+**Prerequisites:** SMTP reputation basics, password-reuse mechanics, SSH tunnelling, and Kerberos delegation abuse. Finish all five stages to capture all three flags.
+
+## Access
+
+Stub instance gives you a phishing VM (mail relay + sender identity) and a Kali box on the portal segment.`,
+      objectives: [
+        "Capture the phished credential from the harvesting page (flag 1)",
+        "Reuse the credential to drop a web shell on the legacy portal (flag 2)",
+        "Pivot through the dual-homed portal into the internal segment",
+        "Abuse the delegated AD group to reach Domain Admin",
+        "Exfiltrate the crown-jewel share (flag 3)",
+      ],
+      mitre: [
+        { id: "T1566", tactic: "Initial Access" },
+        { id: "T1078", tactic: "Initial Access" },
+        { id: "T1048", tactic: "Exfiltration" },
+      ],
+      cves: [
+        { id: "CVE-2023-23397", note: "Related reading: Outlook calendar NTLM leak — an alternative credential-capture vector for stage 1." },
+        { id: "CVE-2021-34527", note: "Related reading: PrintNightmare-style escalation fits the delegated-group abuse in stage 4." },
+      ],
+      tags: ["kill-chain", "phishing", "webshell", "pivoting", "red-team"],
+      flags: [
+        { id: "f-creds", name: "flag.creds — phished mailbox credential captured", points: 250, flagType: "STATIC", answerHash: hashFlag("CR{ph1shed_m41lbox_cr3ds}") },
+        // DYNAMIC seed — value is derived per user at submission time, never stored.
+        { id: "f-shell", name: "flag.shell — webshell on legacy portal", points: 300, flagType: "DYNAMIC" },
+        { id: "f-exfil", name: "flag.exfil — crown-jewel share exfiltrated", points: 400, flagType: "STATIC", answerHash: hashFlag("CR{cr1ms0n_l1ne_exf1l}") },
+      ],
+      hints: [
+        { id: "h-1", title: "Reputation first", body: "The mail relay only forwards for senders with a warm SPF record. Log in as the scheduling user on the relay before sending the phish.", cost: 40 },
+        { id: "h-2", title: "Reuse beats brute force", body: "The portal admin console does not enforce MFA and shares the password policy with the mailbox tenant. One credential, many doors.", cost: 60 },
+        { id: "h-3", title: "The delegation is the ladder", body: "The workstation group is listed in the delegation ACL on the backup container. Abuse the delegation, not the box.", cost: 90 },
+      ],
+      artifacts: [
+        { name: "crimson-line-arrows.png", kind: "Diagram", size: "180 KB", url: "#stub" },
+        { name: "phish-kit-preview.html", kind: "Phish kit", size: "9 KB", url: "#stub" },
+        { name: "segment-map.txt", kind: "Notes", size: "2 KB", url: "#stub" },
+      ],
+      writeupMd: `## Solution — Crimson Line
+
+1. Send the phish through the relay, land the harvest. Flag 1 prints on the harvesting page callback.
+2. Reuse the mailbox password on the legacy portal admin console, upload the shellkit. Flag 2 is written by the shell on first connect.
+3. \`ssh -i portal-key\` through the dual-homed portal into WS-CR-04; enumerate the delegated group membership.
+4. Abuse the constrained delegation ACL to request a service ticket as the backup service account, DCSync the last hop.
+5. Mount the crown-jewel share via the pivot and \`curl\` the archive to the phishing VM — flag 3 is read at exfil time.`,
+    },
   ];
 }
 

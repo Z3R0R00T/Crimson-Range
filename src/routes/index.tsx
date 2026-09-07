@@ -21,6 +21,8 @@ function Home() {
 [+] payroll-whisperer      [AI Red-Team]      500 pts
 [+] helpdesk-harvest       [Active Directory] 700 pts
 [+] invoice-inspector      [Web/API]          350 pts
+[+] shadow-ledger          [Cloud]            450 pts
+[+] crimson-line           [Kill-Chain]       950 pts
 root@range:~# connect --portal
 > establishing secure channel... OK`}
         </pre>
@@ -40,6 +42,8 @@ root@range:~# connect --portal
             ["◈ AI RED-TEAM", "Prompt-injection, tool abuse, model exfiltration labs."],
             ["▣ ACTIVE DIRECTORY", "Kerberos abuse, delegation traps, full kill-chains."],
             ["⌁ WEB / API", "BOLA, IDOR, auth bypasses against modern stacks."],
+            ["☁ CLOUD", "Public buckets, over-permissive IAM, role-assumption chains."],
+            ["⛓ KILL-CHAIN", "Phish → shell → pivot → privesc → exfil, end to end."],
           ].map(([t, d]) => (
             <div key={t} className="rounded border border-[#1d2532] bg-black/40 p-3">
               <p className="font-bold text-[#f0f3f8]">{t}</p>
