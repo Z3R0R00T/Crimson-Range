@@ -1,7 +1,7 @@
 import { Link, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect, useState, type ReactNode } from "react";
 import { getMe, logout } from "~/server/functions";
-import type { SafeUser } from "~/server/store";
+import type { SafeUser } from "~/server/types";
 
 export function useMe() {
   const [me, setMe] = useState<SafeUser | null | undefined>(undefined);
