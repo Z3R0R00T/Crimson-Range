@@ -8,7 +8,7 @@ import {
   submitFlag,
   unlockHint,
 } from "~/server/functions";
-import type { ChallengeDetail, InstanceRecord } from "~/server/store";
+import type { ChallengeDetail, InstanceRecord } from "~/server/types";
 
 export const Route = createFileRoute("/challenges/$slug")({
   component: Detail,

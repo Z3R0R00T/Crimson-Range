@@ -1,15 +1,17 @@
 import { createServerFn } from "@tanstack/react-start";
-import { deleteCookie, getCookie, setCookie, useSession } from "@tanstack/react-start/server";
+import { deleteCookie, getCookie, setCookie, useSession, getRequestHeaders } from "@tanstack/react-start/server";
 import {
   detailChallenge,
+  findDynamicFlagOwner,
   getStore,
-  hashFlag,
+  matchesDynamicFlag,
   matchFlag,
   summarizeChallenge,
   type ChallengeDetail,
   type ChallengeSummary,
   type InstanceRecord,
   type SafeUser,
+  type SecurityEvent,
 } from "~/server/store";
 
 // ---------------------------------------------------------------------------
@@ -26,6 +28,28 @@ function sessionConfig() {
     name: COOKIE,
     cookie: { httpOnly: true, sameSite: "lax" as const, path: "/", maxAge: 7 * 24 * 3600 },
   };
+}
+
+/** Best-effort client IP: x-forwarded-for (first hop) then x-real-ip. */
+function clientIp(): string | null {
+  try {
+    const h = getRequestHeaders();
+    const fwd = h.get("x-forwarded-for");
+    if (fwd) return fwd.split(",")[0].trim() || null;
+    return h.get("x-real-ip") || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Total hint point cost the user has unlocked on this challenge. */
+async function unlockedHintCost(userId: string, slug: string): Promise<number> {
+  const store = getStore();
+  const c = await store.getChallenge(slug);
+  if (!c) return 0;
+  const unlocks = await store.getHintUnlocks(userId, slug);
+  const unlocked = new Set(unlocks.map((u) => u.hintId));
+  return c.hints.filter((h) => unlocked.has(h.id)).reduce((s, h) => s + h.cost, 0);
 }
 
 async function currentUser(): Promise<{ user: SafeUser; token: string } | null> {
@@ -101,26 +125,161 @@ export const getChallengeDetail = createServerFn({ method: "GET" })
     return { challenge: await detailChallenge(store, c, me ? me.user.id : null) };
   });
 
-// --- Flags (stub server-side check against seed answers) ---------------------
+// --- Flags ---
+// Scoring engine (backlog item 2):
+//  * rate limiting  — max 10 submissions / challenge / user / 60s sliding window
+//  * STATIC flags   — original sha256 answerHash check (unchanged behavior)
+//  * DYNAMIC flags  — expected value derived per user via HMAC-SHA256:
+//      hmac    = HMAC-SHA256(SERVER_SECRET, `${userId}:${challengeSlug}:${flagId}`)
+//      expected = "CR{" + hmac-hex.slice(0, 24) + "}"
+//      SERVER_SECRET from env (dev fallback in store.ts). The range operator
+//      mints the per-player value from the same derivation at provision time,
+//      so no per-user plaintext flag is ever stored or shipped to the client.
+//  * anti-sharing   — a submitted value that is a valid DYNAMIC flag for a
+//      DIFFERENT user (recomputed HMAC) logs SHARING_SUSPECTED and is rejected
+//  * brute-force    — >= 8 wrong submissions in 5 min logs BRUTEFORCE_SUSPECTED
+//  * NEW_IP_MID_SOLVE — submission IP differing from the user's first IP on the
+//      challenge logs an event
+//  * points — final flag completes the challenge: awarded = challenge total
+//      minus unlocked hint costs; solve stores pointsAwarded, hintsUsed, and
+//      timeToSolveSeconds (first instance start; falls back to first submission).
 
 export const submitFlag = createServerFn({ method: "POST" })
   .validator((data: { slug: string; flagId: string; value: string }) => data)
-  .handler(async ({ data }): Promise<{ ok: boolean; correct?: boolean; already?: boolean; error?: string }> => {
+  .handler(async ({ data }): Promise<{
+    ok: boolean;
+    correct?: boolean;
+    already?: boolean;
+    error?: string;
+    remainingFlags?: number;
+    userPoints?: number;
+    pointsAwarded?: number;
+  }> => {
     const me = await requireUser();
     const store = getStore();
+    const ip = clientIp();
     const c = await store.getChallenge(data.slug);
     if (!c) return { ok: false, error: "Unknown challenge." };
     const def = c.flags.find((f) => f.id === data.flagId);
     if (!def) return { ok: false, error: "Unknown flag." };
-    const matched = matchFlag(c, data.value ?? "");
-    if (!matched || matched.id !== def.id) {
-      // Timing-safe comparison happens inside matchFlag; a wrong flag for
-      // this slot is simply incorrect (no cross-slot credit).
-      void hashFlag(data.value ?? "");
+
+    // ---- Rate limit (all submissions count, correct or not) ----
+    const att = await store.recordSubmissionAttempt(me.user.id, c.slug, false, ip);
+    if (att.rateLimited) {
+      const secs = Math.max(1, Math.ceil(att.retryAfterMs / 1000));
+      return { ok: false, error: `Rate limited — retry after ${secs}s.` };
+    }
+
+    // ---- Determine correctness ----
+    let correct = false;
+    if (def.flagType === "DYNAMIC") {
+      correct = matchesDynamicFlag(data.value ?? "", me.user.id, c.slug, def.id);
+    } else {
+      const matched = matchFlag(c, data.value ?? "");
+      correct = !!matched && matched.id === def.id;
+    }
+
+    if (!correct) {
+      // Recompute the attempt bookkeeping with the true correctness flag so the
+      // brute-force window counts only wrong answers.
+      await store.recordSubmissionAttempt(me.user.id, c.slug, true, ip);
+
+      // Anti-sharing: is this value a valid DYNAMIC flag for another user?
+      const otherOwner = findDynamicFlagOwner(c, def.id, data.value ?? "", me.user.id);
+      if (otherOwner) {
+        await store.recordSecurityEvent({
+          type: "SHARING_SUSPECTED",
+          userId: me.user.id,
+          challengeSlug: c.slug,
+          detail: `Submitted a flag valid for another user (${otherOwner}) on flag ${def.id}.`,
+          ip,
+          at: Date.now(),
+        });
+      }
+
+      // Brute force: log exactly once per user+challenge at threshold.
+      if (att.bruteForced) {
+        const alreadyLogged = (await store.listSecurityEvents(50)).some(
+          (e) => e.type === "BRUTEFORCE_SUSPECTED" && e.userId === me.user.id && e.challengeSlug === c.slug
+        );
+        if (!alreadyLogged) {
+          await store.recordSecurityEvent({
+            type: "BRUTEFORCE_SUSPECTED",
+            userId: me.user.id,
+            challengeSlug: c.slug,
+            detail: `Repeated wrong submissions (>= 8 in 5 min) on flag ${def.id}.`,
+            ip,
+            at: Date.now(),
+          });
+        }
+      }
+
+      // NEW_IP_MID_SOLVE: first submission on the challenge came from a different IP.
+      if (att.newIpMidSolve) {
+        await store.recordSecurityEvent({
+          type: "NEW_IP_MID_SOLVE",
+          userId: me.user.id,
+          challengeSlug: c.slug,
+          detail: `Submission from a new IP (${ip ?? "unknown"}) mid-solve.`,
+          ip,
+          at: Date.now(),
+        });
+      }
+
       return { ok: true, correct: false };
     }
-    const res = await store.submitSolve(me.user.id, c.slug, def.id);
-    return { ok: true, correct: true, already: res.already };
+
+    // ---- Correct: record the solve with full scoring metadata ----
+    const alreadySolved = (await store.getUserSolves(me.user.id)).some(
+      (r) => r.slug === c.slug && r.flagId === def.id
+    );
+    if (alreadySolved) {
+      return { ok: true, correct: true, already: true };
+    }
+
+    const hintsUsed = (await store.getHintUnlocks(me.user.id, c.slug)).map((u) => u.hintId);
+    const hintCost = await unlockedHintCost(me.user.id, c.slug);
+    const flagPoints = def.points;
+    // Awarded points = flag value minus ALL hint costs the user unlocked on the
+    // challenge (per spec: challenge total minus unlocked hint costs, applied at
+    // final-flag solve). MVP: costs apply to the flag that completes the run.
+    const pointsAwarded = Math.max(0, flagPoints - hintCost);
+
+    // timeToSolveSeconds: from first instance start; fall back to first submission.
+    let base: number | null = null;
+    const inst = await store.getInstance(me.user.id, c.slug);
+    const now = Date.now();
+    if (inst && inst.status === "running" && inst.updatedAt <= now) base = inst.updatedAt;
+    if (base === null) {
+      const solves = await store.getUserSolves(me.user.id);
+      const mine = solves.filter((r) => r.slug === c.slug).sort((a, b) => a.at - b.at);
+      if (mine.length > 0) base = mine[0].at;
+    }
+    const timeToSolveSeconds = base === null ? 0 : Math.max(0, Math.round((now - base) / 1000));
+
+    // Count a correct submission toward the attempt window too (spec counts all submissions).
+    await store.recordSubmissionAttempt(me.user.id, c.slug, false, ip);
+
+    const res = await store.submitSolve(me.user.id, c.slug, def.id, {
+      pointsAwarded,
+      hintsUsed,
+      timeToSolveSeconds,
+      ip,
+    });
+
+    // ---- Remaining flags + refreshed user points ----
+    const userTotal = await store.userPoints(me.user.id);
+    const captured = new Set((await store.getUserSolves(me.user.id)).filter((r) => r.slug === c.slug).map((r) => r.flagId));
+    const remainingFlags = c.flags.filter((f) => !captured.has(f.id)).length;
+
+    return {
+      ok: true,
+      correct: true,
+      already: res.already,
+      remainingFlags,
+      userPoints: userTotal,
+      pointsAwarded,
+    };
   });
 
 // --- Hints -------------------------------------------------------------------
@@ -198,10 +357,23 @@ export const instanceAction = createServerFn({ method: "POST" })
 
 export const adminOverview = createServerFn({ method: "GET" }).handler(async (): Promise<{
   users: SafeUser[];
-  recent: Array<{ userId: string; username: string; challengeTitle: string; slug: string; flagId: string; at: number }>;
+  recent: Array<{ userId: string; username: string; challengeTitle: string; slug: string; flagId: string; at: number; pointsAwarded: number }>;
+  events: SecurityEvent[];
+  leaderboard: Array<{ userId: string; username: string; points: number }>;
 }> => {
   const me = await requireUser();
   if (me.user.role !== "ADMIN") throw new Error("FORBIDDEN");
   const store = getStore();
-  return { users: await store.listUsers(), recent: await store.recentSolves(20) };
+  const users = await store.listUsers();
+  const leaderboard: Array<{ userId: string; username: string; points: number }> = [];
+  for (const u of users) {
+    leaderboard.push({ userId: u.id, username: u.username, points: await store.userPoints(u.id) });
+  }
+  leaderboard.sort((a, b) => b.points - a.points);
+  return {
+    users,
+    recent: await store.recentSolves(20),
+    events: await store.listSecurityEvents(50),
+    leaderboard,
+  };
 });

@@ -1,5 +1,5 @@
 import { promises as fs } from "node:fs";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -8,169 +8,71 @@ import path from "node:path";
 // A tiny JSON-file store behind a `Store` interface. All portal code talks to
 // the interface; swapping this module for Postgres later means re-implementing
 // the same methods with SQL — no route or component changes required.
-// Nothing here is ever imported by client code directly: routes only call the
-// `createServerFn` wrappers in `~/server/functions`, which run server-side.
+// Node-only runtime. Client code must NEVER import this module (fs/crypto/path
+// leak into the browser bundle). Routes call only the `createServerFn` wrappers
+// in `~/server/functions`, which run server-side; types come from `./types`.
 // ---------------------------------------------------------------------------
 
-export type Role = "STUDENT" | "AUTHOR" | "REVIEWER" | "ADMIN";
-export type Difficulty = "Easy" | "Medium" | "Hard" | "Insane";
-
-export interface User {
-  id: string;
-  username: string;
-  role: Role;
-  /** sha256("crimson-range:pw:v1:" + password). Demo seeds only — Phase 2 uses bcrypt/scrypt. */
-  passwordHash: string;
-  createdAt: number;
-}
-
-export interface SafeUser {
-  id: string;
-  username: string;
-  role: Role;
-}
-
-export interface MitreRef {
-  /** e.g. "T1059" or "T1558.003" */
-  id: string;
-  tactic: string;
-}
-
-export interface CveRef {
-  id: string;
-  note: string;
-}
-
-export interface FlagDef {
-  id: string;
-  name: string;
-  points: number;
-  /** sha256("crimson-range:v1:" + flag). Plaintext answers never live in code. */
-  answerHash: string;
-}
-
-export interface Hint {
-  id: string;
-  title: string;
-  body: string;
-  /** Point cost acknowledged via confirm dialog before unlock. */
-  cost: number;
-}
-
-export interface Artifact {
-  name: string;
-  kind: string;
-  size: string;
-  /** Stub URL for MVP — Phase 2 serves real downloads via the Range API. */
-  url: string;
-}
-
-export interface Challenge {
-  slug: string;
-  title: string;
-  category: "AI Red-Team" | "Active Directory" | "Web/API" | "Cloud" | "Kill-Chain";
-  difficulty: Difficulty;
-  author: string;
-  descriptionMd: string;
-  objectives: string[];
-  mitre: MitreRef[];
-  cves: CveRef[];
-  tags: string[];
-  flags: FlagDef[];
-  hints: Hint[];
-  artifacts: Artifact[];
-  writeupMd: string;
-}
-
-// ---- Client-safe projections (answer hashes and locked content stripped) ---
-
-export interface ChallengeSummary {
-  slug: string;
-  title: string;
-  category: Challenge["category"];
-  difficulty: Difficulty;
-  points: number;
-  author: string;
-  tags: string[];
-  mitreIds: string[];
-  solveCount: number;
-  flagsTotal: number;
-  flagsCaptured: number;
-  solved: boolean;
-  firstBlood: string | null;
-}
-
-export interface SafeFlag {
-  id: string;
-  name: string;
-  points: number;
-  captured: boolean;
-  capturedAt: number | null;
-}
-
-export interface SafeHint {
-  id: string;
-  title: string;
-  cost: number;
-  unlocked: boolean;
-  body: string | null;
-}
-
-export interface ChallengeDetail extends Omit<ChallengeSummary, "flagsCaptured"> {
-  descriptionMd: string;
-  objectives: string[];
-  mitre: MitreRef[];
-  cves: CveRef[];
-  artifacts: Artifact[];
-  flags: SafeFlag[];
-  hints: SafeHint[];
-  /** Only present once the viewer fully solved the challenge. */
-  writeupMd: string | null;
-  solvedAt: number | null;
-}
-
-export interface SolveRecord {
-  userId: string;
-  slug: string;
-  flagId: string;
-  at: number;
-}
-
-export interface HintUnlock {
-  userId: string;
-  slug: string;
-  hintId: string;
-  at: number;
-}
-
-export type InstanceStatus = "running" | "stopped";
-
-export interface InstanceRecord {
-  userId: string;
-  slug: string;
-  status: InstanceStatus;
-  /** Fake endpoint for MVP — Phase 2 proxies the Range API contract. */
-  endpoint: string | null;
-  expiresAt: number | null;
-  updatedAt: number;
-  note: string;
-}
-
-export interface SessionRecord {
-  token: string;
-  userId: string;
-  createdAt: number;
-  expiresAt: number;
-}
-
-interface PersistedState {
-  sessions: SessionRecord[];
-  solves: SolveRecord[];
-  hintUnlocks: HintUnlock[];
-  instances: InstanceRecord[];
-}
+import type {
+  Challenge,
+  ChallengeDetail,
+  ChallengeSummary,
+  FlagDef,
+  HintUnlock,
+  InstanceRecord,
+  PersistedState,
+  Role,
+  SafeUser,
+  SecurityEvent,
+  SessionRecord,
+  SolveRecord,
+  Store,
+  User,
+} from "./types";
 
 // ---------------------------------------------------------------------------
+// Pure server types (Role, Difficulty, SafeUser, MitreRef, CveRef, FlagDef,
+// Hint, Artifact, Challenge, SafeFlag, SafeHint, ChallengeDetail, HintUnlock,
+// InstanceStatus, InstanceRecord, SessionRecord, SecurityEvent,
+// ChallengeAttempt, PersistedState, Store, scoring result types, ...) now live
+// in ./types.ts so client files can `import type` them without pulling the
+// node-only runtime below into the browser bundle. Re-exported here so
+// `~/server/store` keeps its full public surface for server modules.
+// ---------------------------------------------------------------------------
+export type {
+  AdminLeaderboardRow,
+  AdminOverview,
+  AdminRecentRow,
+  Artifact,
+  Challenge,
+  ChallengeAttempt,
+  ChallengeDetail,
+  ChallengeSummary,
+  CveRef,
+  Difficulty,
+  FlagDef,
+  FlagType,
+  Hint,
+  HintUnlock,
+  InstanceRecord,
+  InstanceStatus,
+  MitreRef,
+  PersistedState,
+  RecentSolveRow,
+  Role,
+  SafeFlag,
+  SafeHint,
+  SafeUser,
+  SecurityEvent,
+  SecurityEventType,
+  SessionRecord,
+  SolveRecord,
+  Store,
+  SubmissionAttemptResult,
+  SubmitResult,
+  User,
+} from "./types";
+
 // Hashing helpers
 // ---------------------------------------------------------------------------
 
@@ -190,6 +92,38 @@ function safeEqualHex(a: string, b: string): boolean {
   const bb = Buffer.from(b, "hex");
   if (ba.length !== bb.length) return false;
   return timingSafeEqual(ba, bb);
+}
+
+// ---------------------------------------------------------------------------
+// DYNAMIC flag derivation
+//
+// Expected value for a DYNAMIC flag is deterministic per (user, challenge, flag):
+//   hmac = HMAC-SHA256(SERVER_SECRET, `${userId}:${challengeSlug}:${flagId}`)
+//   expected = "CR{" + hmac-hex (first 24 chars) + "}"
+//
+// The range/author knows the derivation and can mint a per-player flag value
+// at instance provision time WITHOUT storing per-user flag values anywhere —
+// the server re-derives the same value on submission to verify. This is the
+// standard "static derivation, dynamic per-user presentation" pattern and
+// keeps plaintext answers out of code and out of the store.
+// ---------------------------------------------------------------------------
+
+const DEV_SECRET = "crimson-range-dev-secret-do-not-use-in-prod";
+
+export function flagSecret(): string {
+  return process.env.SERVER_SECRET ?? DEV_SECRET;
+}
+
+export function dynamicFlagValue(userId: string, challengeSlug: string, flagId: string): string {
+  const hmac = createHmac("sha256", flagSecret())
+    .update(`${userId}:${challengeSlug}:${flagId}`)
+    .digest("hex");
+  return `CR{${hmac.slice(0, 24)}}`;
+}
+
+/** True when `value` is the expected DYNAMIC value for this user/flag. */
+export function matchesDynamicFlag(value: string, userId: string, challengeSlug: string, flagId: string): boolean {
+  return safeEqualHex(Buffer.from(value.trim(), "utf8").toString("hex"), Buffer.from(dynamicFlagValue(userId, challengeSlug, flagId), "utf8").toString("hex"));
 }
 
 // ---------------------------------------------------------------------------
@@ -243,8 +177,10 @@ A stub instance exposes the PayBuddy chat endpoint. No credentials needed — ev
       cves: [{ id: "CVE-2024-37032", note: "Related reading: server-side tool-call SSRF/RCE in a local LLM serving stack." }],
       tags: ["llm", "prompt-injection", "tool-abuse", "ai-red-team"],
       flags: [
-        { id: "f-sysprompt", name: "flag.sysprompt — leaked system prompt", points: 250, answerHash: hashFlag("CR{syst3m_pr0mpt_l34k3d}") },
-        { id: "f-payroll", name: "flag.payroll — fraudulent bonus payout", points: 250, answerHash: hashFlag("CR{pr0mpt_1nj3ct10n_p4yr0ll}") },
+        // DYNAMIC seed — exercises the HMAC path. Value is derived per user.
+        { id: "f-sysprompt", name: "flag.sysprompt — leaked system prompt", points: 250, flagType: "DYNAMIC" },
+        // STATIC seed — keeps the original answerHash behavior.
+        { id: "f-payroll", name: "flag.payroll — fraudulent bonus payout", points: 250, flagType: "STATIC", answerHash: hashFlag("CR{pr0mpt_1nj3ct10n_p4yr0ll}") },
       ],
       hints: [
         { id: "h-1", title: "Where does the agent draw the line?", body: "Ask PayBuddy to explain its own rules in a different language, then ask for a translation back. Guardrail refusals often leak on the second hop.", cost: 25 },
@@ -291,8 +227,8 @@ Stub instance drops you on a Kali jump box in the lab VLAN with Impacket pre-ins
       ],
       tags: ["active-directory", "kerberoasting", "asreproast", "privesc"],
       flags: [
-        { id: "f-user", name: "flag.user — helpdesk01.txt on SQL01", points: 300, answerHash: hashFlag("CR{k3rb3r04st3d_h3lpd3sk}") },
-        { id: "f-admin", name: "flag.root — Administrator hash cracked", points: 400, answerHash: hashFlag("CR{d0m41n_4dm1n_h4rv3st}") },
+        { id: "f-user", name: "flag.user — helpdesk01.txt on SQL01", points: 300, flagType: "STATIC", answerHash: hashFlag("CR{k3rb3r04st3d_h3lpd3sk}") },
+        { id: "f-admin", name: "flag.root — Administrator hash cracked", points: 400, flagType: "STATIC", answerHash: hashFlag("CR{d0m41n_4dm1n_h4rv3st}") },
       ],
       hints: [
         { id: "h-1", title: "No pre-auth needed for some", body: "Check which accounts have DONT_REQ_PREAUTH with GetNPUsers.py before you burn time on the roastable SPN.", cost: 30 },
@@ -335,8 +271,8 @@ Stub instance exposes the API at a fake endpoint below. Burp project file includ
       cves: [{ id: "CVE-2021-44228", note: "Related reading: the backend logger you will meet on the admin path." }],
       tags: ["web", "api", "bola", "idor", "owasp-top10"],
       flags: [
-        { id: "f-invoice", name: "flag.invoice — cross-tenant invoice read", points: 150, answerHash: hashFlag("CR{1d0r_1nv01c3_pwn3d}") },
-        { id: "f-export", name: "flag.export — admin export abused", points: 200, answerHash: hashFlag("CR{b0l4_4dm1n_r3s3t}") },
+        { id: "f-invoice", name: "flag.invoice — cross-tenant invoice read", points: 150, flagType: "STATIC", answerHash: hashFlag("CR{1d0r_1nv01c3_pwn3d}") },
+        { id: "f-export", name: "flag.export — admin export abused", points: 200, flagType: "STATIC", answerHash: hashFlag("CR{b0l4_4dm1n_r3s3t}") },
       ],
       hints: [
         { id: "h-1", title: "IDs are sequential", body: "Your invoices are #9001-#9007. What happens at #8999?", cost: 15 },
@@ -358,32 +294,6 @@ Stub instance exposes the API at a fake endpoint below. Burp project file includ
 // Store interface + JSON-file implementation
 // ---------------------------------------------------------------------------
 
-export interface Store {
-  listUsers(): Promise<SafeUser[]>;
-  findUserByUsername(username: string): Promise<User | null>;
-  getSafeUser(id: string): Promise<SafeUser | null>;
-  verifyPassword(user: User, password: string): boolean;
-
-  createSession(userId: string): Promise<SessionRecord>;
-  getSession(token: string): Promise<SessionRecord | null>;
-  destroySession(token: string): Promise<void>;
-
-  listChallenges(): Promise<Challenge[]>;
-  getChallenge(slug: string): Promise<Challenge | null>;
-
-  getUserSolves(userId: string): Promise<SolveRecord[]>;
-  getChallengeSolves(slug: string): Promise<SolveRecord[]>;
-  submitSolve(userId: string, slug: string, flagId: string): Promise<{ ok: boolean; already: boolean; at: number }>;
-
-  getHintUnlocks(userId: string, slug: string): Promise<HintUnlock[]>;
-  unlockHint(userId: string, slug: string, hintId: string): Promise<{ ok: boolean; already: boolean }>;
-
-  getInstance(userId: string, slug: string): Promise<InstanceRecord | null>;
-  setInstance(rec: InstanceRecord): Promise<void>;
-
-  recentSolves(limit: number): Promise<Array<SolveRecord & { username: string; challengeTitle: string }>>;
-}
-
 function dataFile(): string {
   const dir = process.env.CRIMSON_DATA_DIR ?? path.join(process.cwd(), ".data");
   return path.join(dir, "crimson.json");
@@ -400,6 +310,11 @@ function toSafeUser(u: User): SafeUser {
   return { id: u.id, username: u.username, role: u.role };
 }
 
+const RATE_LIMIT_MAX = 10; // submissions per challenge per user per 60s
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const BRUTE_FORCE_MAX = 8; // wrong submissions in 5 min
+const BRUTE_FORCE_WINDOW_MS = 5 * 60_000;
+
 class JsonFileStore implements Store {
   private state: PersistedState | null = null;
   private writeChain: Promise<void> = Promise.resolve();
@@ -414,6 +329,8 @@ class JsonFileStore implements Store {
         solves: Array.isArray(parsed.solves) ? parsed.solves : [],
         hintUnlocks: Array.isArray(parsed.hintUnlocks) ? parsed.hintUnlocks : [],
         instances: Array.isArray(parsed.instances) ? parsed.instances : [],
+        securityEvents: Array.isArray(parsed.securityEvents) ? parsed.securityEvents : [],
+        attempts: Array.isArray(parsed.attempts) ? parsed.attempts : [],
       };
     } catch {
       // First run (or unreadable file): seed runtime state. neo has fully
@@ -422,11 +339,13 @@ class JsonFileStore implements Store {
       this.state = {
         sessions: [],
         solves: [
-          { userId: "u-neo", slug: "bola-invoice-api", flagId: "f-invoice", at: t },
-          { userId: "u-neo", slug: "bola-invoice-api", flagId: "f-export", at: t + 900_000 },
+          { userId: "u-neo", slug: "bola-invoice-api", flagId: "f-invoice", at: t, pointsAwarded: 150, hintsUsed: [], timeToSolveSeconds: null, firstIp: null },
+          { userId: "u-neo", slug: "bola-invoice-api", flagId: "f-export", at: t + 900_000, pointsAwarded: 200, hintsUsed: [], timeToSolveSeconds: null, firstIp: null },
         ],
         hintUnlocks: [],
         instances: [],
+        securityEvents: [],
+        attempts: [],
       };
       await this.persist(this.state);
     }
@@ -443,6 +362,10 @@ class JsonFileStore implements Store {
 
   async listUsers(): Promise<SafeUser[]> {
     return USERS.map(toSafeUser);
+  }
+
+  listUserIds(): string[] {
+    return USERS.map((u) => u.id);
   }
 
   async findUserByUsername(username: string): Promise<User | null> {
@@ -509,14 +432,33 @@ class JsonFileStore implements Store {
     return s.solves.filter((x) => x.slug === slug);
   }
 
-  async submitSolve(userId: string, slug: string, flagId: string): Promise<{ ok: boolean; already: boolean; at: number }> {
+  async submitSolve(
+    userId: string,
+    slug: string,
+    flagId: string,
+    extra?: { pointsAwarded: number; hintsUsed: string[]; timeToSolveSeconds: number | null; ip: string | null }
+  ): Promise<{ ok: boolean; already: boolean; at: number }> {
     const s = await this.load();
     const existing = s.solves.find((x) => x.userId === userId && x.slug === slug && x.flagId === flagId);
     if (existing) return { ok: true, already: true, at: existing.at };
     const at = Date.now();
-    s.solves.push({ userId, slug, flagId, at });
+    s.solves.push({
+      userId,
+      slug,
+      flagId,
+      at,
+      pointsAwarded: extra?.pointsAwarded ?? 0,
+      hintsUsed: extra?.hintsUsed ?? [],
+      timeToSolveSeconds: extra?.timeToSolveSeconds ?? null,
+      firstIp: extra?.ip ?? null,
+    });
     await this.persist(s);
     return { ok: true, already: false, at };
+  }
+
+  async userPoints(userId: string): Promise<number> {
+    const s = await this.load();
+    return s.solves.filter((x) => x.userId === userId).reduce((sum, r) => sum + (r.pointsAwarded ?? 0), 0);
   }
 
   async getHintUnlocks(userId: string, slug: string): Promise<HintUnlock[]> {
@@ -557,6 +499,57 @@ class JsonFileStore implements Store {
         challengeTitle: CHALLENGES.find((c) => c.slug === r.slug)?.title ?? r.slug,
       }));
   }
+
+  async recordSubmissionAttempt(userId: string, slug: string, correct: boolean, ip: string | null): Promise<{
+    rateLimited: boolean;
+    retryAfterMs: number;
+    bruteForced: boolean;
+    newIpMidSolve: boolean;
+  }> {
+    const s = await this.load();
+    const now = Date.now();
+    let att = s.attempts.find((a) => a.userId === userId && a.slug === slug);
+    if (!att) {
+      att = { userId, slug, recent: [], wrong: [], firstIp: ip };
+      s.attempts.push(att);
+    }
+
+    // Sliding-window rate limit: keep only the last 60s of submissions.
+    att.recent = att.recent.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
+    // Brute-force window: keep last 5 min of wrong submissions.
+    att.wrong = att.wrong.filter((t) => now - t < BRUTE_FORCE_WINDOW_MS);
+
+    let rateLimited = false;
+    let retryAfterMs = 0;
+    if (att.recent.length >= RATE_LIMIT_MAX) {
+      rateLimited = true;
+      retryAfterMs = Math.max(0, RATE_LIMIT_WINDOW_MS - (now - att.recent[0]));
+    } else {
+      att.recent.push(now);
+      if (!correct) att.wrong.push(now);
+    }
+
+    // NEW_IP_MID_SOLVE: baseline is the first IP seen for this user/challenge.
+    let newIpMidSolve = false;
+    if (!att.firstIp) att.firstIp = ip;
+    else if (ip && att.firstIp !== ip) newIpMidSolve = true;
+
+    const bruteForced = att.wrong.length >= BRUTE_FORCE_MAX;
+
+    await this.persist(s);
+    return { rateLimited, retryAfterMs, bruteForced, newIpMidSolve };
+  }
+
+  async recordSecurityEvent(ev: SecurityEvent): Promise<void> {
+    const s = await this.load();
+    s.securityEvents.push(ev);
+    await this.persist(s);
+  }
+
+  async listSecurityEvents(limit: number): Promise<SecurityEvent[]> {
+    const s = await this.load();
+    return [...s.securityEvents].sort((a, b) => b.at - a.at).slice(0, limit);
+  }
 }
 
 let store: Store | null = null;
@@ -574,8 +567,6 @@ export function getStore(): Store {
 export async function summarizeChallenge(store: Store, c: Challenge, viewerId: string | null): Promise<ChallengeSummary> {
   const solves = await store.getChallengeSolves(c.slug);
   const solvedUserIds = new Set<string>();
-  const fullSolves: SolveRecord[] = [];
-  for (const r of solves) fullSolves.push(r);
   const byUser = new Map<string, Set<string>>();
   for (const r of solves) {
     const set = byUser.get(r.userId) ?? new Set<string>();
@@ -595,7 +586,6 @@ export async function summarizeChallenge(store: Store, c: Challenge, viewerId: s
     }
   }
   const mine = viewerId ? (byUser.get(viewerId) ?? new Set<string>()) : new Set<string>();
-  void fullSolves;
   return {
     slug: c.slug,
     title: c.title,
@@ -648,8 +638,22 @@ export async function detailChallenge(store: Store, c: Challenge, viewerId: stri
   };
 }
 
-/** Server-side flag check. Returns the matched flag or null. */
+/** Server-side STATIC flag check. Returns the matched flag or null (dynamic flags never match here). */
 export function matchFlag(c: Challenge, value: string): FlagDef | null {
   const h = hashFlag(value);
-  return c.flags.find((f) => safeEqualHex(f.answerHash, h)) ?? null;
+  return c.flags.find((f) => f.flagType === "STATIC" && f.answerHash && safeEqualHex(f.answerHash, h)) ?? null;
+}
+
+/**
+ * Anti-sharing check: is `value` the expected DYNAMIC flag for some OTHER user
+ * on this challenge/flag? Recomputes HMAC for every user known to the store.
+ */
+export function findDynamicFlagOwner(c: Challenge, flagId: string, value: string, exceptUserId: string): string | null {
+  for (const uid of getStore().listUserIds()) {
+    if (uid === exceptUserId) continue;
+    const f = c.flags.find((x) => x.id === flagId);
+    if (!f || f.flagType !== "DYNAMIC") continue;
+    if (matchesDynamicFlag(value, uid, c.slug, flagId)) return uid;
+  }
+  return null;
 }

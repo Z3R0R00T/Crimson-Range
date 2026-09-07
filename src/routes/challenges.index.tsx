@@ -2,7 +2,7 @@ import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { Shell, Card, DIFF_STYLE, CAT_ICON, useMe } from "~/components/shell";
 import { listChallengeSummaries } from "~/server/functions";
-import type { ChallengeSummary } from "~/server/store";
+import type { ChallengeSummary } from "~/server/types";
 
 export const Route = createFileRoute("/challenges/")({
   component: Catalogue,
