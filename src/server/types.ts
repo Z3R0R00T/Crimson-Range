@@ -9,7 +9,7 @@
 // and import it with `import type { ... } from "~/server/types"`.
 // ---------------------------------------------------------------------------
 
-export type Role = "STUDENT" | "AUTHOR" | "REVIEWER" | "ADMIN";
+export type Role = "STUDENT" | "AUTHOR" | "REVIEWER" | "ADMIN" | "VENDOR";
 export type Difficulty = "Easy" | "Medium" | "Hard" | "Insane";
 export type FlagType = "STATIC" | "DYNAMIC";
 
@@ -94,6 +94,104 @@ export interface Challenge {
   hints: Hint[];
   artifacts: Artifact[];
   writeupMd: string;
+  // --- Author CMS (backlog: author CMS) ---
+  /**
+   * Publishing lifecycle. Seeded fixtures are always PUBLISHED. Author-created
+   * challenges start at DRAFT and move DRAFT→REVIEW→VALIDATED→PUBLISHED
+   * (+RETIRED from PUBLISHED). Only PUBLISHED challenges appear in the player
+   * catalogue / detail / flag-submit paths.
+   */
+  status: ChallengeStatus;
+  /** Username of the creator (VENDOR/AUTHOR/ADMIN). Seeds use "crimson-author". */
+  createdBy: string;
+  /** Manual point override. When null, points auto-derive from flag sum. */
+  pointsOverride: number | null;
+  /** Range/instance fields carried from manifest.yaml (validated on import). */
+  instanceType: string;
+  cpuLimit: string;
+  memLimit: string;
+  /** Two DISTINCT reviewer sign-offs (REVIEWER or ADMIN, neither the author). */
+  signoffs: ReviewSignoff[];
+  /** Validation checklist state (stored per challenge, ticked by reviewers). */
+  checklist: Record<ChecklistKey, boolean>;
+}
+
+// --- Author CMS lifecycle types ---
+
+export type ChallengeStatus = "DRAFT" | "REVIEW" | "VALIDATED" | "PUBLISHED" | "RETIRED";
+
+export type ChecklistKey =
+  | "solve_reproduced"
+  | "walkthrough_accurate"
+  | "flags_rotate"
+  | "reset_clean"
+  | "difficulty_agreed";
+
+export const CHECKLIST_ITEMS: Array<{ key: ChecklistKey; label: string }> = [
+  { key: "solve_reproduced", label: "solve reproduced" },
+  { key: "walkthrough_accurate", label: "walkthrough accurate" },
+  { key: "flags_rotate", label: "flags rotate" },
+  { key: "reset_clean", label: "reset clean" },
+  { key: "difficulty_agreed", label: "difficulty agreed" },
+];
+
+export interface ReviewSignoff {
+  reviewer: string;
+  at: number;
+}
+
+/** Input for creating a challenge via the author CMS (manifest-shaped). */
+export interface ChallengeCreateInput {
+  slug?: string;
+  title: string;
+  category: Challenge["category"];
+  difficulty: Difficulty;
+  descriptionMd: string;
+  objectives: string[];
+  mitre?: MitreRef[];
+  cves?: CveRef[];
+  tags?: string[];
+  flags: FlagDef[];
+  hints?: Hint[];
+  artifacts?: Artifact[];
+  writeupMd?: string;
+  instanceType: string;
+  cpuLimit: string;
+  memLimit: string;
+  author: string;
+}
+
+/** Editable subset for cmsUpdateChallenge (lifecycle fields excluded). */
+export type ChallengePatch = Partial<
+  Omit<Challenge, "slug" | "status" | "signoffs" | "createdBy">
+>;
+
+/** Signoff input for cmsAddSignoff. */
+export interface CmsSignoffInput {
+  userId: string;
+  username: string;
+  checklist?: Partial<Record<ChecklistKey, boolean>>;
+}
+
+export interface CmsResult {
+  ok: boolean;
+  error?: string;
+  challenge?: Challenge;
+}
+
+/** One field-level problem from validateManifest. */
+export interface ManifestIssue {
+  field: string;
+  message: string;
+}
+
+export interface AuthorChallengeMeta {
+  slug: string;
+  title: string;
+  status: ChallengeStatus;
+  createdBy: string;
+  points: number;
+  signoffs: ReviewSignoff[];
 }
 
 // ---- Client-safe projections (answer hashes and locked content stripped) ---
@@ -222,6 +320,8 @@ export interface PersistedState {
   instances: InstanceRecord[];
   securityEvents: SecurityEvent[];
   attempts: ChallengeAttempt[];
+  /** Author-CMS challenges persisted at runtime (seeded fixtures stay in code). */
+  customChallenges: Challenge[];
 }
 
 /**
@@ -243,6 +343,26 @@ export interface Store {
 
   listChallenges(): Promise<Challenge[]>;
   getChallenge(slug: string): Promise<Challenge | null>;
+  /** All challenges incl. non-published (author CMS views). Includes `status`. */
+  listAllChallenges(): Promise<Challenge[]>;
+  /** Persist a new (DRAFT) or replace an existing custom challenge. Seeds are read-only. */
+  saveCustomChallenge(c: Challenge): Promise<void>;
+
+  // --- Author CMS (backlog: author CMS) ---
+  /** Create a DRAFT challenge stamped with createdBy=username. */
+  createChallenge(input: ChallengeCreateInput, username: string): Promise<CmsResult>;
+  /** Edit a custom challenge. Author (createdBy) or ADMIN only; seeds immutable. */
+  updateChallenge(slug: string, patch: ChallengePatch, actor: SafeUser): Promise<CmsResult>;
+  /**
+   * Lifecycle: DRAFT→REVIEW→VALIDATED→PUBLISHED, plus RETIRED from any state.
+   * VALIDATED requires 2 distinct non-author REVIEWER/ADMIN signoffs.
+   * VENDOR may submit for review and retire, but cannot validate or publish.
+   */
+  transitionStatus(slug: string, to: ChallengeStatus, actor: SafeUser): Promise<CmsResult>;
+  /** Record a reviewer signoff. Rejects author-self and duplicate signers. */
+  addSignoff(slug: string, input: CmsSignoffInput, actor: SafeUser): Promise<CmsResult>;
+  /** Review queue: non-published, non-retired. VENDOR sees only their own. */
+  listReviewQueue(actor: SafeUser): Promise<Challenge[]>;
 
   getUserSolves(userId: string): Promise<SolveRecord[]>;
   getChallengeSolves(slug: string): Promise<SolveRecord[]>;
