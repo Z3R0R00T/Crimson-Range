@@ -14,13 +14,25 @@ import path from "node:path";
 // ---------------------------------------------------------------------------
 
 import type {
+  AuthorChallengeMeta,
   Challenge,
+  ChallengeCreateInput,
   ChallengeDetail,
+  ChallengePatch,
+  ChallengeStatus,
   ChallengeSummary,
+  ChecklistKey,
+  CmsResult,
+  CmsSignoffInput,
+  CveRef,
   FlagDef,
+  FlagType,
   HintUnlock,
   InstanceRecord,
+  ManifestIssue,
+  MitreRef,
   PersistedState,
+  ReviewSignoff,
   Role,
   SafeUser,
   SecurityEvent,
@@ -44,10 +56,13 @@ export type {
   AdminOverview,
   AdminRecentRow,
   Artifact,
+  AuthorChallengeMeta,
   Challenge,
   ChallengeAttempt,
   ChallengeDetail,
+  ChallengeStatus,
   ChallengeSummary,
+  ChecklistKey,
   CveRef,
   Difficulty,
   FlagDef,
@@ -59,6 +74,7 @@ export type {
   MitreRef,
   PersistedState,
   RecentSolveRow,
+  ReviewSignoff,
   Role,
   SafeFlag,
   SafeHint,
@@ -72,6 +88,7 @@ export type {
   SubmitResult,
   User,
 } from "./types";
+export { CHECKLIST_ITEMS } from "./types";
 
 // Hashing helpers
 // ---------------------------------------------------------------------------
@@ -140,17 +157,91 @@ function seedUsers(): User[] {
     passwordHash: hashPassword(password),
     createdAt: SEED_TIME,
   });
-  // Demo credentials are documented in ENGINEER_NOTES.md (MVP seeded logins).
+  // Demo credentials are documented on the login page (MVP seeded logins).
+  // NOTE: no AUTHOR seed existed before — "crimson-author" was only a display
+  // string on seeds. The author CMS seeds real logins below.
   return [
     mk("u-neo", "neo", "STUDENT", "crimson-neo"),
     mk("u-trinity", "trinity", "STUDENT", "crimson-trinity"),
+    mk("u-author", "author", "AUTHOR", "crimson-author"),
+    mk("u-reviewer", "reviewer", "REVIEWER", "crimson-reviewer"),
+    mk("u-reviewer2", "reviewer2", "REVIEWER", "crimson-reviewer2"),
+    mk("u-vendor", "vendor", "VENDOR", "crimson-vendor"),
     mk("u-admin", "admin", "ADMIN", "crimson-admin"),
   ];
 }
 
+/** CMS defaults stamped onto every seeded fixture (always PUBLISHED). */
+export function challengeDefaults(): Pick<
+  Challenge,
+  "status" | "createdBy" | "pointsOverride" | "instanceType" | "cpuLimit" | "memLimit" | "signoffs" | "checklist"
+> {
+  return {
+    status: "PUBLISHED",
+    createdBy: "crimson-author",
+    pointsOverride: null,
+    instanceType: "kali+jumpbox",
+    cpuLimit: "2",
+    memLimit: "4Gi",
+    signoffs: [],
+    checklist: {
+      solve_reproduced: false,
+      walkthrough_accurate: false,
+      flags_rotate: false,
+      reset_clean: false,
+      difficulty_agreed: false,
+    },
+  };
+}
+
+/** Fresh CMS draft skeleton for a new challenge by `username`. */
+export function newDraftChallenge(username: string, slug: string): Challenge {
+  return {
+    slug,
+    title: "Untitled lab",
+    category: "Web/API",
+    difficulty: "Easy",
+    author: username,
+    instanceTtlMinutes: 120,
+    descriptionMd: "## Brief\n\nDescribe the lab here.",
+    objectives: ["First objective"],
+    mitre: [],
+    cves: [],
+    tags: [],
+    flags: [{ id: "f-1", name: "flag.1", points: 100, flagType: "STATIC", answerHash: hashFlag("CR{change_me}") }],
+    hints: [],
+    artifacts: [],
+    writeupMd: "",
+    status: "DRAFT",
+    createdBy: username,
+    pointsOverride: null,
+    instanceType: "kali+jumpbox",
+    cpuLimit: "2",
+    memLimit: "4Gi",
+    signoffs: [],
+    checklist: {
+      solve_reproduced: false,
+      walkthrough_accurate: false,
+      flags_rotate: false,
+      reset_clean: false,
+      difficulty_agreed: false,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Seed data
+// ---------------------------------------------------------------------------
+//
+// DESIGN DECISION (documented in PR): seeded challenges stay read-only
+// fixtures in CODE (always PUBLISHED). CMS-created challenges persist
+// separately in the JSON file (`customChallenges`) and overlay/extend the
+// seed list at read time. This keeps fixtures deterministic across deploys.
 function seedChallenges(): Challenge[] {
+  const d = () => ({ ...challengeDefaults() });
   return [
     {
+      ...d(),
       slug: "prompt-injection-payroll",
       title: "Payroll Whisperer",
       category: "AI Red-Team",
@@ -197,6 +288,7 @@ A stub instance exposes the PayBuddy chat endpoint. No credentials needed — ev
 3. Both flags print in tool-call results.`,
     },
     {
+      ...d(),
       slug: "kerberoast-helpdesk",
       title: "Helpdesk Harvest",
       category: "Active Directory",
@@ -245,6 +337,7 @@ Stub instance drops you on a Kali jump box in the lab VLAN with Impacket pre-ins
 3. The cracked account is in "Backup Operators" — the nightly script on SQL01 is writable, plant a net-group escalation, DCSync, done.`,
     },
     {
+      ...d(),
       slug: "bola-invoice-api",
       title: "Invoice Inspector",
       category: "Web/API",
@@ -288,6 +381,7 @@ Stub instance exposes the API at a fake endpoint below. Burp project file includ
 2. POST /api/v2/admin/export with \`{"role":"admin"}\` bypasses the middleware check; export any invoice including the admin seed record holding flag 2.`,
     },
     {
+      ...d(),
       slug: "shadow-ledger",
       title: "Shadow Ledger",
       category: "Cloud",
@@ -334,6 +428,7 @@ Stub instance drops you on a jump box with the AWS CLI preconfigured for an unpr
 3. \`aws sts assume-role\` with the recovered credentials, then \`aws s3 cp s3://shadow-ledger/restricted/ledger.json -\` under the assumed role prints flag 2.`,
     },
     {
+      ...d(),
       slug: "crimson-line",
       title: "Crimson Line",
       category: "Kill-Chain",
@@ -433,6 +528,7 @@ class JsonFileStore implements Store {
       const raw = await fs.readFile(dataFile(), "utf8");
       const parsed = JSON.parse(raw) as PersistedState;
       this.state = {
+        customChallenges: Array.isArray(parsed.customChallenges) ? parsed.customChallenges : [],
         sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
         solves: Array.isArray(parsed.solves) ? parsed.solves : [],
         hintUnlocks: Array.isArray(parsed.hintUnlocks) ? parsed.hintUnlocks : [],
@@ -445,6 +541,7 @@ class JsonFileStore implements Store {
       // solved the web/API lab so first-blood and solve counts render.
       const t = SEED_TIME + 3600_000;
       this.state = {
+        customChallenges: [],
         sessions: [],
         solves: [
           { userId: "u-neo", slug: "bola-invoice-api", flagId: "f-invoice", at: t, pointsAwarded: 150, hintsUsed: [], timeToSolveSeconds: null, firstIp: null },
@@ -523,11 +620,29 @@ class JsonFileStore implements Store {
   }
 
   async listChallenges(): Promise<Challenge[]> {
-    return CHALLENGES;
+    const s = await this.load();
+    return [...CHALLENGES, ...s.customChallenges].filter((c) => c.status === "PUBLISHED");
   }
 
   async getChallenge(slug: string): Promise<Challenge | null> {
-    return CHALLENGES.find((c) => c.slug === slug) ?? null;
+    const seed = CHALLENGES.find((c) => c.slug === slug);
+    if (seed) return seed;
+    const s = await this.load();
+    return s.customChallenges.find((c) => c.slug === slug) ?? null;
+  }
+
+  async listAllChallenges(): Promise<Challenge[]> {
+    const s = await this.load();
+    return [...CHALLENGES, ...s.customChallenges];
+  }
+
+  async saveCustomChallenge(c: Challenge): Promise<void> {
+    if (CHALLENGES.some((x) => x.slug === c.slug)) throw new Error("Seeded challenges are read-only.");
+    const s = await this.load();
+    const i = s.customChallenges.findIndex((x) => x.slug === c.slug);
+    if (i >= 0) s.customChallenges[i] = c;
+    else s.customChallenges.push(c);
+    await this.persist(s);
   }
 
   async getUserSolves(userId: string): Promise<SolveRecord[]> {
@@ -596,6 +711,146 @@ class JsonFileStore implements Store {
     await this.persist(s);
   }
 
+  // --- Author CMS (backlog: author CMS) ------------------------------------
+  //
+  // Seeds are read-only fixtures (always PUBLISHED); author-created challenges
+  // live in `customChallenges` (persisted via crimson.json). All mutating CMS
+  // helpers below are store-module functions (NOT Store interface methods) so
+  // the Store contract stays player-path compatible; server functions call
+  // these with a SafeUser actor. Every mutation goes through persist().
+
+  private isSeed(slug: string): boolean {
+    return CHALLENGES.some((x) => x.slug === slug);
+  }
+
+  private async mustGet(slug: string): Promise<Challenge | null> {
+    const seed = CHALLENGES.find((c) => c.slug === slug);
+    if (seed) return seed;
+    const st = await this.load();
+    return st.customChallenges.find((c) => c.slug === slug) ?? null;
+  }
+
+  private async putCustom(c: Challenge): Promise<void> {
+    const st = await this.load();
+    const i = st.customChallenges.findIndex((x) => x.slug === c.slug);
+    if (i >= 0) st.customChallenges[i] = c;
+    else st.customChallenges.push(c);
+    await this.persist(st);
+  }
+
+  /** Create a DRAFT challenge stamped with createdBy=username. */
+  async createChallenge(input: ChallengeCreateInput, username: string): Promise<CmsResult> {
+    const issues = validateManifest(input as unknown as Record<string, unknown>);
+    if (issues.length) return { ok: false, error: issues.map((i) => `${i.field}: ${i.message}`).join("; ") };
+    const slug = slugify(input.slug?.trim() ? input.slug : (input.title ?? ""));
+    if (!slug) return { ok: false, error: "slug: derived slug is empty." };
+    if (await this.mustGet(slug)) return { ok: false, error: `slug: "${slug}" already exists.` };
+    const base = newDraftChallenge(username, slug);
+    const c: Challenge = {
+      ...base,
+      title: input.title.trim(),
+      category: input.category,
+      difficulty: input.difficulty,
+      descriptionMd: input.descriptionMd,
+      objectives: input.objectives,
+      mitre: input.mitre ?? [],
+      cves: input.cves ?? [],
+      tags: input.tags ?? [],
+      flags: input.flags as Challenge["flags"],
+      hints: input.hints ?? [],
+      artifacts: input.artifacts ?? [],
+      writeupMd: input.writeupMd ?? "",
+      instanceType: input.instanceType,
+      cpuLimit: input.cpuLimit,
+      memLimit: input.memLimit,
+    };
+    await this.putCustom(c);
+    return { ok: true, challenge: c };
+  }
+
+  /** Edit a custom challenge. Author (createdBy) or ADMIN only; seeds immutable. */
+  async updateChallenge(slug: string, patch: ChallengePatch, actor: SafeUser): Promise<CmsResult> {
+    if (this.isSeed(slug)) return { ok: false, error: "Seeded challenges are read-only." };
+    const cur = await this.mustGet(slug);
+    if (!cur) return { ok: false, error: "Unknown challenge." };
+    if (!(actor.role === "ADMIN" || cur.createdBy === actor.username))
+      return { ok: false, error: "Only the author or an ADMIN can edit this challenge." };
+    if ((patch as Record<string, unknown>).slug !== undefined || patch.status !== undefined || patch.signoffs !== undefined || (patch as Record<string, unknown>).createdBy !== undefined)
+      return { ok: false, error: "slug, status, signoffs and createdBy are managed via lifecycle calls." };
+    const next: Challenge = { ...cur, ...patch };
+    await this.putCustom(next);
+    return { ok: true, challenge: next };
+  }
+
+  /**
+   * Lifecycle: DRAFT→REVIEW→VALIDATED→PUBLISHED, plus RETIRED from any state.
+   * VALIDATED requires 2 distinct non-author REVIEWER/ADMIN signoffs.
+   * VENDOR may submit for review and retire, but cannot validate or publish.
+   */
+  async transitionStatus(slug: string, to: ChallengeStatus, actor: SafeUser): Promise<CmsResult> {
+    if (this.isSeed(slug)) return { ok: false, error: "Seeded challenges are read-only." };
+    const cur = await this.mustGet(slug);
+    if (!cur) return { ok: false, error: "Unknown challenge." };
+    const from = cur.status;
+    if (to === from) return { ok: false, error: `Already ${from}.` };
+    const staff = actor.role === "ADMIN" || actor.role === "REVIEWER";
+    const isAuthor = cur.createdBy === actor.username;
+    if (to === "RETIRED") {
+      if (!(isAuthor || staff)) return { ok: false, error: "Only the author, REVIEWER or ADMIN can retire." };
+      await this.putCustom({ ...cur, status: "RETIRED" });
+      return { ok: true, challenge: { ...cur, status: "RETIRED" } };
+    }
+    if (from === "DRAFT" && to === "REVIEW") {
+      if (!(isAuthor || actor.role === "ADMIN")) return { ok: false, error: "Only the author or ADMIN can submit for review." };
+      await this.putCustom({ ...cur, status: "REVIEW" });
+      return { ok: true, challenge: { ...cur, status: "REVIEW" } };
+    }
+    if (from === "REVIEW" && to === "VALIDATED") {
+      if (actor.role === "VENDOR") return { ok: false, error: "VENDOR cannot validate challenges." };
+      if (!staff) return { ok: false, error: "Only REVIEWER or ADMIN can validate." };
+      const ok = cur.signoffs.filter((x) => x.reviewer !== cur.createdBy);
+      const distinct = new Set(ok.map((x) => x.reviewer));
+      if (distinct.size < 2) return { ok: false, error: "VALIDATED needs 2 distinct non-author REVIEWER/ADMIN signoffs." };
+      await this.putCustom({ ...cur, status: "VALIDATED" });
+      return { ok: true, challenge: { ...cur, status: "VALIDATED" } };
+    }
+    if (from === "VALIDATED" && to === "PUBLISHED") {
+      if (actor.role === "VENDOR") return { ok: false, error: "VENDOR cannot publish challenges." };
+      if (!staff) return { ok: false, error: "Only REVIEWER or ADMIN can publish." };
+      await this.putCustom({ ...cur, status: "PUBLISHED" });
+      return { ok: true, challenge: { ...cur, status: "PUBLISHED" } };
+    }
+    return { ok: false, error: `Illegal transition ${from}→${to}.` };
+  }
+
+  /** Record a reviewer signoff. Rejects author-self and duplicate signers. */
+  async addSignoff(slug: string, input: CmsSignoffInput, actor: SafeUser): Promise<CmsResult> {
+    if (this.isSeed(slug)) return { ok: false, error: "Seeded challenges are read-only." };
+    const cur = await this.mustGet(slug);
+    if (!cur) return { ok: false, error: "Unknown challenge." };
+    if (actor.role !== "REVIEWER" && actor.role !== "ADMIN")
+      return { ok: false, error: "Only REVIEWER or ADMIN can sign off." };
+    if (input.username !== actor.username) return { ok: false, error: "Signoff username must match the signer." };
+    if (input.username === cur.createdBy) return { ok: false, error: "The author cannot sign off their own challenge." };
+    if (cur.signoffs.some((x) => x.reviewer === input.username))
+      return { ok: false, error: "This reviewer already signed off." };
+    const next: Challenge = {
+      ...cur,
+      signoffs: [...cur.signoffs, { reviewer: input.username, at: Date.now() }],
+      checklist: input.checklist ? { ...cur.checklist, ...input.checklist } : cur.checklist,
+    };
+    await this.putCustom(next);
+    return { ok: true, challenge: next };
+  }
+
+  /** Review queue: non-published, non-retired. VENDOR sees only their own. */
+  async listReviewQueue(actor: SafeUser): Promise<Challenge[]> {
+    const all = await this.listAllChallenges();
+    const q = all.filter((c) => c.status !== "PUBLISHED" && c.status !== "RETIRED");
+    if (actor.role === "VENDOR") return q.filter((c) => c.createdBy === actor.username);
+    return q;
+  }
+
   async recentSolves(limit: number): Promise<Array<SolveRecord & { username: string; challengeTitle: string }>> {
     const s = await this.load();
     return [...s.solves]
@@ -658,6 +913,46 @@ class JsonFileStore implements Store {
     const s = await this.load();
     return [...s.securityEvents].sort((a, b) => b.at - a.at).slice(0, limit);
   }
+}
+
+function slugify(v: string): string {
+  return v
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+/**
+ * Validate a challenge manifest object. Returns one issue per missing/invalid
+ * field across the 14 required manifest fields:
+ * slug?, title, category, difficulty, descriptionMd, objectives, flags,
+ * instanceType, cpuLimit, memLimit, mitre, cves, tags, author.
+ * (slug may be derived from title on create, so it is validated only when present.)
+ */
+export function validateManifest(obj: Record<string, unknown>): ManifestIssue[] {
+  const issues: ManifestIssue[] = [];
+  const need = (field: string, ok: boolean, message: string) => {
+    if (!ok) issues.push({ field, message });
+  };
+  const o = obj as Record<string, unknown>;
+  if (o.slug !== undefined && o.slug !== null && String(o.slug).trim() !== "")
+    need("slug", /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(String(o.slug).trim()), "must be kebab-case (a-z, 0-9, hyphens).");
+  need("title", typeof o.title === "string" && o.title.trim().length > 0, "title is required.");
+  need("category", typeof o.category === "string" && ["AI Red-Team", "Active Directory", "Web/API", "Cloud", "Kill-Chain"].includes(o.category as string), "must be a known category.");
+  need("difficulty", typeof o.difficulty === "string" && ["Easy", "Medium", "Hard", "Insane"].includes(o.difficulty as string), "must be Easy|Medium|Hard|Insane.");
+  need("descriptionMd", typeof o.descriptionMd === "string" && o.descriptionMd.trim().length > 0, "descriptionMd is required.");
+  need("objectives", Array.isArray(o.objectives) && o.objectives.length > 0, "at least one objective is required.");
+  need("flags", Array.isArray(o.flags) && o.flags.length > 0, "at least one flag is required.");
+  need("instanceType", typeof o.instanceType === "string" && o.instanceType.trim().length > 0, "instanceType is required.");
+  need("cpuLimit", typeof o.cpuLimit === "string" && o.cpuLimit.trim().length > 0, "cpuLimit is required.");
+  need("memLimit", typeof o.memLimit === "string" && o.memLimit.trim().length > 0, "memLimit is required.");
+  need("mitre", Array.isArray(o.mitre), "mitre must be an array.");
+  need("cves", Array.isArray(o.cves), "cves must be an array.");
+  need("tags", Array.isArray(o.tags), "tags must be an array.");
+  need("author", typeof o.author === "string" && o.author.trim().length > 0, "author is required.");
+  return issues;
 }
 
 let store: Store | null = null;

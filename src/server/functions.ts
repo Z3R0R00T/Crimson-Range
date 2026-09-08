@@ -7,12 +7,23 @@ import {
   matchesDynamicFlag,
   matchFlag,
   summarizeChallenge,
-  type ChallengeDetail,
-  type ChallengeSummary,
-  type InstanceRecord,
-  type SafeUser,
-  type SecurityEvent,
+  validateManifest,
 } from "~/server/store";
+import type {
+  Challenge,
+  ChallengeCreateInput,
+  ChallengeDetail,
+  ChallengePatch,
+  ChallengeStatus,
+  ChallengeSummary,
+  ChecklistKey,
+  CmsResult,
+  CmsSignoffInput,
+  InstanceRecord,
+  ManifestIssue,
+  SafeUser,
+  SecurityEvent,
+} from "~/server/types";
 import {
   extendInstance,
   readInstance,
@@ -368,3 +379,101 @@ export const adminOverview = createServerFn({ method: "GET" }).handler(async ():
     leaderboard,
   };
 });
+
+// --- Author CMS (backlog: author CMS) ------------------------------------------
+// Role rules:
+//  * AUTHOR  — create/update own + submit DRAFT→REVIEW.
+//  * VENDOR  — same as AUTHOR but never validate/publish, and sees only own
+//    items in the queue (store.listReviewQueue already scopes VENDOR to own).
+//  * REVIEWER — read queue + signoff.
+//  * ADMIN   — everything.
+// CMS mutations themselves are enforced again inside the store (author check,
+// signoff checks, lifecycle checks); the function layer applies the role
+// pre-checks below and throws FORBIDDEN/UNAUTHORIZED like adminOverview.
+
+const CMS_ROLES = ["AUTHOR", "VENDOR", "REVIEWER", "ADMIN"] as const;
+
+async function requireCmsRole(): Promise<{ user: SafeUser; token: string }> {
+  const me = await requireUser();
+  if (!CMS_ROLES.includes(me.user.role as (typeof CMS_ROLES)[number])) throw new Error("FORBIDDEN");
+  return me;
+}
+
+/** Queue view: AUTHOR/VENDOR own scope via listReviewQueue for non-admin; ADMIN all. */
+export const cmsList = createServerFn({ method: "GET" }).handler(async (): Promise<{
+  challenges: Challenge[];
+}> => {
+  const me = await requireCmsRole();
+  const store = getStore();
+  if (me.user.role === "ADMIN") return { challenges: await store.listAllChallenges() };
+  return { challenges: await store.listReviewQueue(me.user) };
+});
+
+export const cmsGet = createServerFn({ method: "GET" })
+  .validator((data: { slug: string }) => data)
+  .handler(async ({ data }): Promise<{ challenge: Challenge | null }> => {
+    const me = await requireCmsRole();
+    const store = getStore();
+    const c = await store.getChallenge(data.slug);
+    if (!c) return { challenge: null };
+    if (me.user.role !== "ADMIN" && me.user.role !== "REVIEWER" && c.createdBy !== me.user.username) {
+      throw new Error("FORBIDDEN");
+    }
+    return { challenge: c };
+  });
+
+export const cmsCreate = createServerFn({ method: "POST" })
+  .validator((data: { input: ChallengeCreateInput }) => data)
+  .handler(async ({ data }): Promise<CmsResult> => {
+    const me = await requireCmsRole();
+    if (me.user.role !== "AUTHOR" && me.user.role !== "VENDOR" && me.user.role !== "ADMIN") {
+      throw new Error("FORBIDDEN");
+    }
+    return getStore().createChallenge(data.input, me.user.username);
+  });
+
+export const cmsUpdate = createServerFn({ method: "POST" })
+  .validator((data: { slug: string; patch: ChallengePatch }) => data)
+  .handler(async ({ data }): Promise<CmsResult> => {
+    const me = await requireCmsRole();
+    if (me.user.role !== "AUTHOR" && me.user.role !== "VENDOR" && me.user.role !== "ADMIN") {
+      throw new Error("FORBIDDEN");
+    }
+    if (me.user.role !== "ADMIN") {
+      const cur = await getStore().getChallenge(data.slug);
+      if (cur && cur.createdBy !== me.user.username) throw new Error("FORBIDDEN");
+    }
+    return getStore().updateChallenge(data.slug, data.patch, me.user);
+  });
+
+export const cmsTransition = createServerFn({ method: "POST" })
+  .validator((data: { slug: string; to: ChallengeStatus }) => data)
+  .handler(async ({ data }): Promise<CmsResult> => {
+    const me = await requireCmsRole();
+    if (me.user.role === "AUTHOR" || me.user.role === "VENDOR") {
+      // Authors/vendors may only submit their own DRAFT→REVIEW (and retire own).
+      if (data.to === "VALIDATED" || data.to === "PUBLISHED") throw new Error("FORBIDDEN");
+      if (data.to === "REVIEW") {
+        const cur = await getStore().getChallenge(data.slug);
+        if (cur && cur.createdBy !== me.user.username) throw new Error("FORBIDDEN");
+      }
+    }
+    return getStore().transitionStatus(data.slug, data.to, me.user);
+  });
+
+export const cmsSignoff = createServerFn({ method: "POST" })
+  .validator((data: { slug: string; checklist?: Partial<Record<ChecklistKey, boolean>> }) => data)
+  .handler(async ({ data }): Promise<CmsResult> => {
+    const me = await requireCmsRole();
+    if (me.user.role !== "REVIEWER" && me.user.role !== "ADMIN") throw new Error("FORBIDDEN");
+    const input: CmsSignoffInput = { userId: me.user.id, username: me.user.username, checklist: data.checklist };
+    return getStore().addSignoff(data.slug, input, me.user);
+  });
+
+export const cmsValidateManifest = createServerFn({ method: "POST" })
+  .validator((data: { obj: Record<string, unknown> }) => data)
+  .handler(async ({ data }): Promise<{ issues: ManifestIssue[] }> => {
+    const me = await requireCmsRole();
+    if (me.user.role === "VENDOR") throw new Error("FORBIDDEN");
+    return { issues: validateManifest(data.obj) };
+  });

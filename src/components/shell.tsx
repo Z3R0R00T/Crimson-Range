@@ -50,6 +50,11 @@ export function Shell({ children }: { children: ReactNode }) {
                 [admin]
               </Link>
             )}
+            {me && me.role !== "STUDENT" && (
+              <Link to="/admin/challenges" className="text-[#8b98ac] hover:text-[#e5484d] [&.active]:text-[#e5484d]">
+                [cms]
+              </Link>
+            )}
           </nav>
           <div className="ml-auto flex items-center gap-3 text-xs">
             {me === undefined ? (
