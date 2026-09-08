@@ -1,6 +1,10 @@
 import { createServerFn } from "@tanstack/react-start";
 import { deleteCookie, getCookie, setCookie, useSession, getRequestHeaders } from "@tanstack/react-start/server";
 import {
+  buildAnalytics,
+  buildDashboard,
+  buildLeaderboard,
+  buildPathProgress,
   detailChallenge,
   findDynamicFlagOwner,
   getStore,
@@ -10,6 +14,7 @@ import {
   validateManifest,
 } from "~/server/store";
 import type {
+  AnalyticsOverview,
   Challenge,
   ChallengeCreateInput,
   ChallengeDetail,
@@ -20,10 +25,15 @@ import type {
   CmsResult,
   CmsSignoffInput,
   InstanceRecord,
+  LeaderboardData,
   ManifestIssue,
+  MyDashboard,
+  PathProgress,
   SafeUser,
   SecurityEvent,
+  Team,
 } from "~/server/types";
+import { LEARNING_PATHS } from "~/server/types";
 import {
   extendInstance,
   readInstance,
@@ -378,6 +388,81 @@ export const adminOverview = createServerFn({ method: "GET" }).handler(async ():
     events: await store.listSecurityEvents(50),
     leaderboard,
   };
+});
+
+// --- Engagement layer (backlog: leaderboards + paths + dashboard + analytics) ---
+
+export const leaderboardData = createServerFn({ method: "GET" }).handler(async (): Promise<LeaderboardData> => {
+  return buildLeaderboard(getStore());
+});
+
+export const pathList = createServerFn({ method: "GET" }).handler(async (): Promise<{
+  paths: Array<{ slug: string; title: string; blurb: string; totalSteps: number; steps: string[] }>;
+}> => {
+  return {
+    paths: LEARNING_PATHS.map((p) => ({
+      slug: p.slug,
+      title: p.title,
+      blurb: p.blurb,
+      totalSteps: p.steps.length,
+      steps: [...p.steps],
+    })),
+  };
+});
+
+export const pathProgress = createServerFn({ method: "GET" })
+  .validator((data: { slug: string }) => data)
+  .handler(async ({ data }): Promise<{ path: PathProgress | null }> => {
+    const def = LEARNING_PATHS.find((p) => p.slug === data.slug) ?? null;
+    if (!def) return { path: null };
+    const me = await currentUser();
+    // Anonymous viewers see the path skeleton with every step locked.
+    if (!me) {
+      const store = getStore();
+      const challenges = await store.listChallenges();
+      const byId = new Map(challenges.map((c) => [c.slug, c]));
+      const steps = def.steps
+        .map((slug) => byId.get(slug))
+        .filter((c): c is Challenge => !!c)
+        .map((c, i) => ({
+          slug: c.slug,
+          title: c.title,
+          category: c.category,
+          difficulty: c.difficulty,
+          points: c.flags.reduce((s, f) => s + (f.points ?? 0), 0),
+          state: (i === 0 ? "unlocked" : "locked") as PathProgress["steps"][number]["state"],
+        }));
+      return {
+        path: {
+          slug: def.slug,
+          title: def.title,
+          blurb: def.blurb,
+          totalSteps: steps.length,
+          solvedSteps: 0,
+          pct: 0,
+          complete: false,
+          steps,
+        },
+      };
+    }
+    return { path: await buildPathProgress(getStore(), me.user.id, def) };
+  });
+
+export const myDashboard = createServerFn({ method: "GET" }).handler(async (): Promise<{
+  dashboard: MyDashboard | null;
+}> => {
+  const me = await requireUser();
+  return { dashboard: await buildDashboard(getStore(), me.user.id) };
+});
+
+export const listTeams = createServerFn({ method: "GET" }).handler(async (): Promise<{ teams: Team[] }> => {
+  return { teams: await getStore().listTeams() };
+});
+
+export const analyticsOverview = createServerFn({ method: "GET" }).handler(async (): Promise<AnalyticsOverview> => {
+  const me = await requireUser();
+  if (me.user.role !== "ADMIN") throw new Error("FORBIDDEN");
+  return buildAnalytics(getStore());
 });
 
 // --- Author CMS (backlog: author CMS) ------------------------------------------

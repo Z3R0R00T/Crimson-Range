@@ -20,12 +20,40 @@ export interface User {
   /** sha256("crimson-range:pw:v1:" + password). Demo seeds only — Phase 2 uses bcrypt/scrypt. */
   passwordHash: string;
   createdAt: number;
+  /**
+   * Team membership (engagement layer: leaderboards).
+   * DESIGN CHOICE (documented): teams are a minimal static Team list (see
+   * TEAMS below, same precedent as CHECKLIST_ITEMS) + a nullable teamId on
+   * User. No Team admin UI, no invites, no team roles in MVP — staff accounts
+   * (AUTHOR/REVIEWER/VENDOR/ADMIN) carry teamId null and are excluded from
+   * per-team aggregates. A Postgres swap turns TEAMS into a table and teamId
+   * into a foreign key; no route or component changes required.
+   */
+  teamId: string | null;
 }
 
 export interface SafeUser {
   id: string;
   username: string;
   role: Role;
+  teamId: string | null;
+}
+
+export interface Team {
+  id: string;
+  name: string;
+}
+
+/** Static team list (MVP). See User.teamId docstring for the design choice. */
+export const TEAMS: Team[] = [
+  { id: "red-cell", name: "Red Cell" },
+  { id: "ghost-cell", name: "Ghost Cell" },
+];
+
+/** Pure helper: display name for a teamId (null/unknown → "No team"). */
+export function teamNameOf(teamId: string | null): string {
+  if (!teamId) return "No team";
+  return TEAMS.find((t) => t.id === teamId)?.name ?? "No team";
 }
 
 export interface MitreRef {
@@ -380,6 +408,16 @@ export interface Store {
 
   getInstance(userId: string, slug: string): Promise<InstanceRecord | null>;
   setInstance(rec: InstanceRecord): Promise<void>;
+  /** All instance records for one user (dashboard "active instances"). */
+  listUserInstances(userId: string): Promise<InstanceRecord[]>;
+
+  // --- Engagement layer (backlog: leaderboards + paths + dashboard + analytics) ---
+  /** Static team list (mirrors TEAMS; Postgres swap reads a table instead). */
+  listTeams(): Promise<Team[]>;
+  /** Every solve in the store (leaderboard + analytics aggregates). */
+  listAllSolves(): Promise<SolveRecord[]>;
+  /** Every submission attempt record (analytics denominators). */
+  listAllAttempts(): Promise<ChallengeAttempt[]>;
 
   recentSolves(limit: number): Promise<Array<SolveRecord & { username: string; challengeTitle: string }>>;
 
@@ -482,4 +520,164 @@ export interface AdminOverview {
   recent: AdminRecentRow[];
   events: SecurityEvent[];
   leaderboard: AdminLeaderboardRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Engagement layer (backlog: leaderboards + paths + dashboard + analytics).
+// All pure types — safe for client import from ~/server/types.
+// ---------------------------------------------------------------------------
+
+/** One ranked row on the leaderboard. lastSolveAt breaks ties (earlier wins). */
+export interface LeaderboardRow {
+  userId: string;
+  username: string;
+  teamId: string | null;
+  points: number;
+  solves: number;
+  firstBloods: number;
+  lastSolveAt: number | null;
+}
+
+/** Per-team aggregate for the leaderboard teams tab. */
+export interface TeamStanding {
+  teamId: string;
+  teamName: string;
+  members: number;
+  points: number;
+  solves: number;
+  firstBloods: number;
+}
+
+export interface LeaderboardData {
+  /** All-time ranking (points desc, earliest last-solve wins ties). */
+  global: LeaderboardRow[];
+  /** Solves in the last 30 days only (same shape/ranking). */
+  monthly: LeaderboardRow[];
+  teams: TeamStanding[];
+  /** Month label for the monthly tab, e.g. "last 30 days". */
+  monthlyLabel: string;
+}
+
+/** One step of a learning path — an ordered challenge slug. */
+export interface PathStep {
+  slug: string;
+}
+
+/** Ordered learning path definition (seeded in code, like CHALLENGES). */
+export interface LearningPath {
+  slug: string;
+  title: string;
+  blurb: string;
+  /** Ordered challenge slugs. Later steps unlock as earlier ones are solved. */
+  steps: string[];
+}
+
+/**
+ * Seeded learning paths (engagement layer). Slugs reference real seeded
+ * challenges so steps resolve against listChallenges(); a Postgres swap keeps
+ * these definitions in code (curriculum, not user data).
+ */
+export const LEARNING_PATHS: LearningPath[] = [
+  {
+    slug: "ad-attack-path-101",
+    title: "AD Attack Path 101",
+    blurb: "From helpdesk foothold to domain admin — kerberoasting, AS-REP roasting, and privilege escalation.",
+    steps: ["kerberoast-helpdesk", "crimson-line"],
+  },
+  {
+    slug: "web-api-fundamentals",
+    title: "Web/API Fundamentals",
+    blurb: "Broken access control start to finish — IDOR, BOLA, and abusing trusted admin export.",
+    steps: ["bola-invoice-api", "crimson-line"],
+  },
+];
+
+export type PathStepState = "solved" | "unlocked" | "locked";
+
+export interface PathStepProgress extends PathStep {
+  title: string;
+  category: Challenge["category"];
+  difficulty: Difficulty;
+  points: number;
+  state: PathStepState;
+}
+
+export interface PathProgress {
+  slug: string;
+  title: string;
+  blurb: string;
+  totalSteps: number;
+  solvedSteps: number;
+  pct: number;
+  complete: boolean;
+  steps: PathStepProgress[];
+}
+
+/** Per-category points for the dashboard radar. */
+export interface CategoryPoints {
+  category: Challenge["category"];
+  points: number;
+}
+
+export interface DashboardSolveRow {
+  slug: string;
+  challengeTitle: string;
+  flagId: string;
+  at: number;
+  pointsAwarded: number;
+}
+
+export interface DashboardInstanceRow {
+  slug: string;
+  challengeTitle: string;
+  status: InstanceStatus;
+  endpoint: string | null;
+  expiresAt: number | null;
+}
+
+export interface MyDashboard {
+  user: SafeUser;
+  points: number;
+  /** 1-based global rank (same ordering as /leaderboard global), null if unranked. */
+  rank: number | null;
+  totalPlayers: number;
+  solves: number;
+  firstBloods: number;
+  /** Consecutive UTC days with ≥1 solve, counting back from today. */
+  streakDays: number;
+  categoryPoints: CategoryPoints[];
+  recentSolves: DashboardSolveRow[];
+  activeInstances: DashboardInstanceRow[];
+  paths: PathProgress[];
+}
+
+/** Per-challenge analytics row (ADMIN only). */
+export interface AnalyticsRow {
+  slug: string;
+  title: string;
+  category: Challenge["category"];
+  difficulty: Difficulty;
+  points: number;
+  /** Distinct users who fully solved the challenge. */
+  solvers: number;
+  /** Distinct users who attempted (≥1 submission) but never solved. */
+  attemptersOnly: number;
+  /** solves / (solvers + attemptersOnly); null when nobody engaged. */
+  solveRate: number | null;
+  /** Mean timeToSolveSeconds across completed solves; null when unknown. */
+  avgTimeToSolveSeconds: number | null;
+  /** Mean hintsUsed.length across completed solves. */
+  avgHintsUsed: number;
+  /** First flag (by challenge flag order) no attempter has solved, else null. */
+  dropOffFlagId: string | null;
+  dropOffFlagName: string | null;
+  /** wrong-submission count / all-submission count for the challenge. */
+  failedToSolveRatio: number | null;
+  /** True when solveRate !== null and (solveRate < 0.05 or solveRate > 0.80). */
+  needsReview: boolean;
+}
+
+export interface AnalyticsOverview {
+  rows: AnalyticsRow[];
+  generatedAt: number;
 }

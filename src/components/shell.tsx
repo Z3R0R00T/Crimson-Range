@@ -45,10 +45,26 @@ export function Shell({ children }: { children: ReactNode }) {
             <Link to="/challenges" className="text-[#8b98ac] hover:text-[#e5484d] [&.active]:text-[#e5484d]">
               [challenges]
             </Link>
-            {me && me.role === "ADMIN" && (
-              <Link to="/admin" className="text-[#8b98ac] hover:text-[#e5484d] [&.active]:text-[#e5484d]">
-                [admin]
+            <Link to="/leaderboard" className="text-[#8b98ac] hover:text-[#e5484d] [&.active]:text-[#e5484d]">
+              [leaderboard]
+            </Link>
+            <Link to="/paths" className="text-[#8b98ac] hover:text-[#e5484d] [&.active]:text-[#e5484d]">
+              [paths]
+            </Link>
+            {me && (
+              <Link to="/dashboard" className="text-[#8b98ac] hover:text-[#e5484d] [&.active]:text-[#e5484d]">
+                [dashboard]
               </Link>
+            )}
+            {me && me.role === "ADMIN" && (
+              <>
+                <Link to="/admin" className="text-[#8b98ac] hover:text-[#e5484d] [&.active]:text-[#e5484d]">
+                  [admin]
+                </Link>
+                <Link to="/admin/analytics" className="text-[#8b98ac] hover:text-[#e5484d] [&.active]:text-[#e5484d]">
+                  [analytics]
+                </Link>
+              </>
             )}
             {me && me.role !== "STUDENT" && (
               <Link to="/admin/challenges" className="text-[#8b98ac] hover:text-[#e5484d] [&.active]:text-[#e5484d]">

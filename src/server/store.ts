@@ -14,7 +14,10 @@ import path from "node:path";
 // ---------------------------------------------------------------------------
 
 import type {
+  AnalyticsOverview,
+  AnalyticsRow,
   AuthorChallengeMeta,
+  CategoryPoints,
   Challenge,
   ChallengeCreateInput,
   ChallengeDetail,
@@ -25,12 +28,20 @@ import type {
   CmsResult,
   CmsSignoffInput,
   CveRef,
+  DashboardInstanceRow,
+  DashboardSolveRow,
   FlagDef,
   FlagType,
   HintUnlock,
   InstanceRecord,
+  LeaderboardData,
+  LeaderboardRow,
+  LearningPath,
   ManifestIssue,
   MitreRef,
+  MyDashboard,
+  PathProgress,
+  PathStepProgress,
   PersistedState,
   ReviewSignoff,
   Role,
@@ -39,8 +50,10 @@ import type {
   SessionRecord,
   SolveRecord,
   Store,
+  Team,
   User,
 } from "./types";
+import { LEARNING_PATHS, TEAMS } from "./types";
 
 // ---------------------------------------------------------------------------
 // Pure server types (Role, Difficulty, SafeUser, MitreRef, CveRef, FlagDef,
@@ -55,8 +68,11 @@ export type {
   AdminLeaderboardRow,
   AdminOverview,
   AdminRecentRow,
+  AnalyticsOverview,
+  AnalyticsRow,
   Artifact,
   AuthorChallengeMeta,
+  CategoryPoints,
   Challenge,
   ChallengeAttempt,
   ChallengeDetail,
@@ -64,6 +80,8 @@ export type {
   ChallengeSummary,
   ChecklistKey,
   CveRef,
+  DashboardInstanceRow,
+  DashboardSolveRow,
   Difficulty,
   FlagDef,
   FlagType,
@@ -71,7 +89,14 @@ export type {
   HintUnlock,
   InstanceRecord,
   InstanceStatus,
+  LeaderboardData,
+  LeaderboardRow,
+  LearningPath,
   MitreRef,
+  MyDashboard,
+  PathProgress,
+  PathStepProgress,
+  PathStepState,
   PersistedState,
   RecentSolveRow,
   ReviewSignoff,
@@ -86,9 +111,11 @@ export type {
   Store,
   SubmissionAttemptResult,
   SubmitResult,
+  Team,
+  TeamStanding,
   User,
 } from "./types";
-export { CHECKLIST_ITEMS } from "./types";
+export { CHECKLIST_ITEMS, LEARNING_PATHS, TEAMS, teamNameOf } from "./types";
 
 // Hashing helpers
 // ---------------------------------------------------------------------------
@@ -150,19 +177,22 @@ export function matchesDynamicFlag(value: string, userId: string, challengeSlug:
 const SEED_TIME = Date.parse("2026-08-20T12:00:00Z");
 
 function seedUsers(): User[] {
-  const mk = (id: string, username: string, role: Role, password: string): User => ({
+  const mk = (id: string, username: string, role: Role, password: string, teamId: string | null = null): User => ({
     id,
     username,
     role,
     passwordHash: hashPassword(password),
     createdAt: SEED_TIME,
+    teamId,
   });
   // Demo credentials are documented on the login page (MVP seeded logins).
   // NOTE: no AUTHOR seed existed before — "crimson-author" was only a display
   // string on seeds. The author CMS seeds real logins below.
+  // Teams (engagement layer): the two STUDENT seeds sit on different teams so
+  // the per-team leaderboard tab renders real aggregates out of the box.
   return [
-    mk("u-neo", "neo", "STUDENT", "crimson-neo"),
-    mk("u-trinity", "trinity", "STUDENT", "crimson-trinity"),
+    mk("u-neo", "neo", "STUDENT", "crimson-neo", "red-cell"),
+    mk("u-trinity", "trinity", "STUDENT", "crimson-trinity", "ghost-cell"),
     mk("u-author", "author", "AUTHOR", "crimson-author"),
     mk("u-reviewer", "reviewer", "REVIEWER", "crimson-reviewer"),
     mk("u-reviewer2", "reviewer2", "REVIEWER", "crimson-reviewer2"),
@@ -510,7 +540,7 @@ export function challengePoints(c: Challenge): number {
 }
 
 function toSafeUser(u: User): SafeUser {
-  return { id: u.id, username: u.username, role: u.role };
+  return { id: u.id, username: u.username, role: u.role, teamId: u.teamId ?? null };
 }
 
 const RATE_LIMIT_MAX = 10; // submissions per challenge per user per 60s
@@ -701,6 +731,21 @@ class JsonFileStore implements Store {
   async getInstance(userId: string, slug: string): Promise<InstanceRecord | null> {
     const s = await this.load();
     return s.instances.find((x) => x.userId === userId && x.slug === slug) ?? null;
+  }
+  async listUserInstances(userId: string): Promise<InstanceRecord[]> {
+    const s = await this.load();
+    return s.instances.filter((x) => x.userId === userId);
+  }
+  async listTeams(): Promise<Team[]> {
+    return TEAMS.map((t) => ({ ...t }));
+  }
+  async listAllSolves(): Promise<SolveRecord[]> {
+    const s = await this.load();
+    return [...s.solves];
+  }
+  async listAllAttempts(): Promise<ChallengeAttempt[]> {
+    const s = await this.load();
+    return s.attempts.map((a) => ({ ...a, recent: [...a.recent], wrong: [...a.wrong] }));
   }
 
   async setInstance(rec: InstanceRecord): Promise<void> {
@@ -1045,6 +1090,370 @@ export async function detailChallenge(store: Store, c: Challenge, viewerId: stri
 export function matchFlag(c: Challenge, value: string): FlagDef | null {
   const h = hashFlag(value);
   return c.flags.find((f) => f.flagType === "STATIC" && f.answerHash && safeEqualHex(f.answerHash, h)) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Engagement layer aggregates (backlog: leaderboards + paths + dashboard +
+// analytics). Pure functions of (store, challenges, solves, attempts) so the
+// Postgres swap keeps them: they only use Store interface reads.
+// Ranking rule (shared): points desc, then earliest lastSolveAt wins ties,
+// then username asc for full determinism. Users with no solves sort last.
+// ---------------------------------------------------------------------------
+
+/** Challenge is "fully solved" by user when every flag id has a solve record. */
+export function isChallengeSolvedBy(c: Challenge, userFlagIds: Set<string>): boolean {
+  return c.flags.length > 0 && c.flags.every((f) => userFlagIds.has(f.id));
+}
+
+function rankRows(rows: LeaderboardRow[]): LeaderboardRow[] {
+  return [...rows].sort((a, b) => {
+    if (b.points !== a.points) return b.points - a.points;
+    const atA = a.lastSolveAt ?? Number.POSITIVE_INFINITY;
+    const atB = b.lastSolveAt ?? Number.POSITIVE_INFINITY;
+    if (atA !== atB) return atA - atB;
+    return a.username.localeCompare(b.username);
+  });
+}
+
+/**
+ * First-blood map: challenge slug → username of the earliest FULL solve.
+ * A full solve = the solve record that completes the challenge; the earliest
+ * such record across all users wins.
+ */
+export async function firstBloodByChallenge(store: Store, challenges: Challenge[]): Promise<Map<string, string>> {
+  const solves = await store.listAllSolves();
+  const bySlug = new Map<string, SolveRecord[]>();
+  for (const r of solves) {
+    const arr = bySlug.get(r.slug) ?? [];
+    arr.push(r);
+    bySlug.set(r.slug, arr);
+  }
+  const out = new Map<string, string>();
+  for (const c of challenges) {
+    const recs = (bySlug.get(c.slug) ?? []).sort((a, b) => a.at - b.at);
+    const seen = new Map<string, Set<string>>();
+    for (const r of recs) {
+      const set = seen.get(r.userId) ?? new Set<string>();
+      set.add(r.flagId);
+      seen.set(r.userId, set);
+      if (isChallengeSolvedBy(c, set)) {
+        const u = await store.getSafeUser(r.userId);
+        out.set(c.slug, u ? u.username : r.userId);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+export async function buildLeaderboard(store: Store): Promise<LeaderboardData> {
+  const users = await store.listUsers();
+  const solves = await store.listAllSolves();
+  const challenges = await store.listChallenges();
+  const byId = new Map(challenges.map((c) => [c.slug, c]));
+  const firstBlood = await firstBloodByChallenge(store, challenges);
+  const bloodWinners = new Map<string, number>();
+  for (const name of firstBlood.values()) bloodWinners.set(name, (bloodWinners.get(name) ?? 0) + 1);
+
+  const MONTH_MS = 30 * 24 * 3600_000;
+  const cutoff = Date.now() - MONTH_MS;
+
+  const mkRows = (filter: (r: SolveRecord) => boolean): LeaderboardRow[] => {
+    // Completed-challenge count per user (for the `solves` column).
+    const flagsByUser = new Map<string, Map<string, Set<string>>>();
+    for (const r of solves) {
+      if (!filter(r)) continue;
+      let m = flagsByUser.get(r.userId);
+      if (!m) {
+        m = new Map();
+        flagsByUser.set(r.userId, m);
+      }
+      let set = m.get(r.slug);
+      if (!set) {
+        set = new Set();
+        m.set(r.slug, set);
+      }
+      set.add(r.flagId);
+    }
+    return rankRows(
+      users.map((u) => {
+        const mine = solves.filter((r) => r.userId === u.id && filter(r));
+        const points = mine.reduce((s, r) => s + (r.pointsAwarded ?? 0), 0);
+        const perSlug = flagsByUser.get(u.id) ?? new Map<string, Set<string>>();
+        let solvedCount = 0;
+        for (const [slug, set] of perSlug) {
+          const c = byId.get(slug);
+          if (c && isChallengeSolvedBy(c, set)) solvedCount += 1;
+        }
+        const lastSolveAt = mine.length ? Math.max(...mine.map((r) => r.at)) : null;
+        return {
+          userId: u.id,
+          username: u.username,
+          teamId: u.teamId ?? null,
+          points,
+          solves: solvedCount,
+          firstBloods: bloodWinners.get(u.username) ?? 0,
+          lastSolveAt,
+        };
+      })
+    );
+  };
+
+  const global = mkRows(() => true);
+  const monthly = mkRows((r) => r.at >= cutoff);
+
+  const teams = (await store.listTeams()).map((t) => {
+    const members = users.filter((u) => u.teamId === t.id);
+    const ids = new Set(members.map((u) => u.id));
+    const g = global.filter((r) => ids.has(r.userId));
+    return {
+      teamId: t.id,
+      teamName: t.name,
+      members: members.length,
+      points: g.reduce((s, r) => s + r.points, 0),
+      solves: g.reduce((s, r) => s + r.solves, 0),
+      firstBloods: g.reduce((s, r) => s + r.firstBloods, 0),
+    };
+  });
+  teams.sort((a, b) => b.points - a.points || a.teamName.localeCompare(b.teamName));
+
+  return { global, monthly, teams, monthlyLabel: "last 30 days" };
+}
+
+/** Paths whose step slugs reference challenges missing from the catalogue are skipped per-step (never crash). */
+export async function buildPathProgress(store: Store, userId: string, def: LearningPath): Promise<PathProgress> {
+  const challenges = await store.listChallenges();
+  const byId = new Map(challenges.map((c) => [c.slug, c]));
+  const mySolves = await store.getUserSolves(userId);
+  const flagsBySlug = new Map<string, Set<string>>();
+  for (const r of mySolves) {
+    const set = flagsBySlug.get(r.slug) ?? new Set<string>();
+    set.add(r.flagId);
+    flagsBySlug.set(r.slug, set);
+  }
+  const steps: PathStepProgress[] = [];
+  let gateOpen = true;
+  let solvedSteps = 0;
+  for (const slug of def.steps) {
+    const c = byId.get(slug);
+    if (!c) continue;
+    const solved = isChallengeSolvedBy(c, flagsBySlug.get(slug) ?? new Set<string>());
+    if (solved) solvedSteps += 1;
+    const state = solved ? "solved" : gateOpen ? "unlocked" : "locked";
+    if (!solved) gateOpen = false;
+    steps.push({
+      slug,
+      title: c.title,
+      category: c.category,
+      difficulty: c.difficulty,
+      points: challengePoints(c),
+      state,
+    });
+  }
+  const totalSteps = steps.length;
+  return {
+    slug: def.slug,
+    title: def.title,
+    blurb: def.blurb,
+    totalSteps,
+    solvedSteps,
+    pct: totalSteps ? Math.round((solvedSteps / totalSteps) * 100) : 0,
+    complete: totalSteps > 0 && solvedSteps === totalSteps,
+    steps,
+  };
+}
+
+export async function buildAllPathProgress(store: Store, userId: string): Promise<PathProgress[]> {
+  const out: PathProgress[] = [];
+  for (const def of LEARNING_PATHS) out.push(await buildPathProgress(store, userId, def));
+  return out;
+}
+
+const CATEGORIES: Array<Challenge["category"]> = ["AI Red-Team", "Active Directory", "Web/API", "Cloud", "Kill-Chain"];
+
+function utcDay(ts: number): string {
+  const d = new Date(ts);
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+/** Consecutive UTC days with ≥1 solve, counting back from today. */
+export function streakFromSolves(solves: SolveRecord[], now = Date.now()): number {
+  const days = new Set(solves.map((r) => utcDay(r.at)));
+  let streak = 0;
+  const cursor = new Date(now);
+  // If today has no solve yet, the streak counts back from yesterday (still alive).
+  const todayKey = utcDay(cursor.getTime());
+  if (!days.has(todayKey)) cursor.setUTCDate(cursor.getUTCDate() - 1);
+  while (days.has(utcDay(cursor.getTime()))) {
+    streak += 1;
+    cursor.setUTCDate(cursor.getUTCDate() - 1);
+  }
+  return streak;
+}
+
+export async function buildDashboard(store: Store, userId: string): Promise<MyDashboard | null> {
+  const user = await store.getSafeUser(userId);
+  if (!user) return null;
+  const challenges = await store.listChallenges();
+  const byId = new Map(challenges.map((c) => [c.slug, c]));
+  const mySolves = (await store.getUserSolves(userId)).sort((a, b) => b.at - a.at);
+  const points = mySolves.reduce((s, r) => s + (r.pointsAwarded ?? 0), 0);
+
+  const board = await buildLeaderboard(store);
+  const rankIdx = board.global.findIndex((r) => r.userId === userId);
+  const rank = rankIdx >= 0 ? rankIdx + 1 : null;
+
+  const flagsBySlug = new Map<string, Set<string>>();
+  for (const r of mySolves) {
+    const set = flagsBySlug.get(r.slug) ?? new Set<string>();
+    set.add(r.flagId);
+    flagsBySlug.set(r.slug, set);
+  }
+  let solvedCount = 0;
+  for (const [slug, set] of flagsBySlug) {
+    const c = byId.get(slug);
+    if (c && isChallengeSolvedBy(c, set)) solvedCount += 1;
+  }
+  const firstBlood = await firstBloodByChallenge(store, challenges);
+  let firstBloods = 0;
+  for (const name of firstBlood.values()) if (name === user.username) firstBloods += 1;
+
+  // Category radar: points per category from this user's solves.
+  const catPoints = new Map<string, number>();
+  for (const r of mySolves) {
+    const c = byId.get(r.slug);
+    if (!c) continue;
+    catPoints.set(c.category, (catPoints.get(c.category) ?? 0) + (r.pointsAwarded ?? 0));
+  }
+  const categoryPoints: CategoryPoints[] = CATEGORIES.map((category) => ({
+    category,
+    points: catPoints.get(category) ?? 0,
+  }));
+
+  const recentSolves: DashboardSolveRow[] = mySolves.slice(0, 10).map((r) => ({
+    slug: r.slug,
+    challengeTitle: byId.get(r.slug)?.title ?? r.slug,
+    flagId: r.flagId,
+    at: r.at,
+    pointsAwarded: r.pointsAwarded ?? 0,
+  }));
+
+  const instances = await store.listUserInstances(userId);
+  const activeInstances: DashboardInstanceRow[] = instances
+    .filter((i) => i.status === "running")
+    .map((i) => ({
+      slug: i.slug,
+      challengeTitle: byId.get(i.slug)?.title ?? i.slug,
+      status: i.status,
+      endpoint: i.endpoint,
+      expiresAt: i.expiresAt,
+    }));
+
+  return {
+    user,
+    points,
+    rank,
+    totalPlayers: board.global.length,
+    solves: solvedCount,
+    firstBloods,
+    streakDays: streakFromSolves(mySolves),
+    categoryPoints,
+    recentSolves,
+    activeInstances,
+    paths: await buildAllPathProgress(store, userId),
+  };
+}
+
+export async function buildAnalytics(store: Store): Promise<AnalyticsOverview> {
+  const challenges = await store.listChallenges();
+  const solves = await store.listAllSolves();
+  const attempts = await store.listAllAttempts();
+  const solvesBySlug = new Map<string, SolveRecord[]>();
+  for (const r of solves) {
+    const arr = solvesBySlug.get(r.slug) ?? [];
+    arr.push(r);
+    solvesBySlug.set(r.slug, arr);
+  }
+  const engagedBySlug = new Map<string, Set<string>>();
+  for (const r of solves) {
+    const set = engagedBySlug.get(r.slug) ?? new Set<string>();
+    set.add(r.userId);
+    engagedBySlug.set(r.slug, set);
+  }
+  for (const a of attempts) {
+    if (a.recent.length === 0 && a.wrong.length === 0 && !a.firstIp) continue;
+    const set = engagedBySlug.get(a.slug) ?? new Set<string>();
+    set.add(a.userId);
+    engagedBySlug.set(a.slug, set);
+  }
+
+  const rows: AnalyticsRow[] = challenges.map((c) => {
+    const recs = solvesBySlug.get(c.slug) ?? [];
+    const byUser = new Map<string, Set<string>>();
+    for (const r of recs) {
+      const set = byUser.get(r.userId) ?? new Set<string>();
+      set.add(r.flagId);
+      byUser.set(r.userId, set);
+    }
+    let solvers = 0;
+    for (const set of byUser.values()) if (isChallengeSolvedBy(c, set)) solvers += 1;
+    const engaged = engagedBySlug.get(c.slug) ?? new Set<string>();
+    const attemptersOnly = [...engaged].filter((uid) => {
+      const set = byUser.get(uid);
+      return !set || !isChallengeSolvedBy(c, set);
+    }).length;
+    const denom = solvers + attemptersOnly;
+    const solveRate = denom > 0 ? solvers / denom : null;
+
+    // Completed solves = full-challenge completions (last solve per solver).
+    const completed: SolveRecord[] = [];
+    for (const [uid, set] of byUser) {
+      if (!isChallengeSolvedBy(c, set)) continue;
+      const mine = recs.filter((r) => r.userId === uid).sort((a, b) => a.at - b.at);
+      const last = mine[mine.length - 1];
+      if (last) completed.push(last);
+    }
+    const times = completed.map((r) => r.timeToSolveSeconds).filter((t): t is number => typeof t === "number");
+    const avgTimeToSolveSeconds = times.length ? Math.round(times.reduce((s, t) => s + t, 0) / times.length) : null;
+    const avgHintsUsed = completed.length
+      ? Math.round((completed.reduce((s, r) => s + (r.hintsUsed?.length ?? 0), 0) / completed.length) * 10) / 10
+      : 0;
+
+    // Drop-off flag: first flag (challenge order) no engaged user has solved.
+    const solvedFlagIds = new Set<string>();
+    for (const r of recs) solvedFlagIds.add(r.flagId);
+    const dropOff = c.flags.find((f) => !solvedFlagIds.has(f.id)) ?? null;
+
+    // Failed-to-solve ratio: wrong submissions / all submissions (attempt windows).
+    let wrong = 0;
+    let total = 0;
+    for (const a of attempts) {
+      if (a.slug !== c.slug) continue;
+      wrong += a.wrong.length;
+      total += a.recent.length;
+    }
+    const failedToSolveRatio = total > 0 ? Math.round((wrong / total) * 1000) / 1000 : null;
+
+    const needsReview = solveRate !== null && (solveRate < 0.05 || solveRate > 0.8);
+    return {
+      slug: c.slug,
+      title: c.title,
+      category: c.category,
+      difficulty: c.difficulty,
+      points: challengePoints(c),
+      solvers,
+      attemptersOnly,
+      solveRate,
+      avgTimeToSolveSeconds,
+      avgHintsUsed,
+      dropOffFlagId: dropOff ? dropOff.id : null,
+      dropOffFlagName: dropOff ? dropOff.name : null,
+      failedToSolveRatio,
+      needsReview,
+    };
+  });
+  rows.sort((a, b) => a.slug.localeCompare(b.slug));
+  return { rows, generatedAt: Date.now() };
 }
 
 /**
