@@ -9,6 +9,22 @@
 // with an already-running server. Every sandbox user has passwordless sudo, so
 // the takeover works across user boundaries.
 import handler from "./dist/server/server.js";
+// Mock Range API for the production build (dev-only). The full contract
+// handler lives in ./src/server/mock-range.ts; this is the transport shim for
+// the built server. Disabled in prod via ENABLE_MOCK_RANGE=0.
+import { mockRange } from "./src/server/mock-range";
+
+const mockRangeHandler = async (req: Request): Promise<Response | null> => {
+  const { pathname } = new URL(req.url);
+  if (!pathname.startsWith("/mock-range")) return null;
+  if (process.env.ENABLE_MOCK_RANGE === "0") {
+    return new Response(JSON.stringify({ error: "mock range disabled" }), {
+      status: 403,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  return mockRange().handle(req);
+};
 
 // Pinned, NOT read from the environment. The published preview URL
 // (<label>.<PUBLIC_SITE_DOMAIN>) is reverse-proxied to 0.0.0.0:3000 inside the
@@ -40,6 +56,8 @@ for (let attempt = 1; ; attempt++) {
       port: PORT,
       hostname: HOST,
       async fetch(req) {
+        const mock = await mockRangeHandler(req);
+        if (mock) return mock;
         const { pathname } = new URL(req.url);
         if (pathname !== "/") {
           const file = Bun.file(CLIENT_DIR + pathname);

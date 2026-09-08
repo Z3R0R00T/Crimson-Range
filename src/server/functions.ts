@@ -13,6 +13,14 @@ import {
   type SafeUser,
   type SecurityEvent,
 } from "~/server/store";
+import {
+  extendInstance,
+  readInstance,
+  reapExpiredInstances,
+  resetInstance,
+  startInstance,
+  stopInstance,
+} from "~/server/range-service";
 
 // ---------------------------------------------------------------------------
 // Sessions are server-side records in the store; the browser only holds an
@@ -296,62 +304,45 @@ export const unlockHint = createServerFn({ method: "POST" })
     return { ok: true };
   });
 
-// --- Instance controls (STUB — no Docker; fake state for MVP) ----------------
-// Phase 2 implements these against the Range API contract (BRD §6).
-
-const STUB_TTL_MS = 2 * 3600_000;
-
-function stubEndpoint(slug: string, userId: string): string {
-  const short = userId.replace(/[^a-z0-9]/gi, "").slice(0, 6).toLowerCase() || "op";
-  return `https://stub-${slug.slice(0, 12)}-${short}.range.local:8443`;
-}
+// --- Instance controls (Range API — never Docker) ---------------------------
+// Every action goes through ~/server/range (HTTP client) which talks to the
+// external Range API (RANGE_API_URL + RANGE_API_KEY) or, by default, the
+// in-process mock-range at /mock-range (dev only; ENABLE_MOCK_RANGE=0 turns
+// it off). Policy (cap/TTL/extension/reap) lives in ~/server/range-service.
 
 export const getInstance = createServerFn({ method: "GET" })
   .validator((data: { slug: string }) => data)
   .handler(async ({ data }): Promise<{ instance: InstanceRecord | null }> => {
     const me = await currentUser();
     if (!me) return { instance: null };
-    return { instance: await getStore().getInstance(me.user.id, data.slug) };
+    return { instance: await readInstance(me.user.id, data.slug) };
   });
 
 export const instanceAction = createServerFn({ method: "POST" })
   .validator((data: { slug: string; action: "start" | "reset" | "extend" | "stop" }) => data)
   .handler(async ({ data }): Promise<{ ok: boolean; instance?: InstanceRecord; error?: string }> => {
     const me = await requireUser();
-    const store = getStore();
-    const c = await store.getChallenge(data.slug);
-    if (!c) return { ok: false, error: "Unknown challenge." };
-    const now = Date.now();
-    const prev = await store.getInstance(me.user.id, data.slug);
-    let rec: InstanceRecord;
     switch (data.action) {
       case "start":
-        rec = {
-          userId: me.user.id,
-          slug: data.slug,
-          status: "running",
-          endpoint: stubEndpoint(data.slug, me.user.id),
-          expiresAt: now + STUB_TTL_MS,
-          updatedAt: now,
-          note: "STUB — no container provisioned. Phase 2 wires this to the Range API.",
-        };
-        break;
+        return startInstance(me.user.id, data.slug);
       case "reset":
-        if (!prev || prev.status !== "running") return { ok: false, error: "No running instance to reset." };
-        rec = { ...prev, expiresAt: now + STUB_TTL_MS, updatedAt: now, note: "STUB — reset simulated." };
-        break;
+        return resetInstance(me.user.id, data.slug);
       case "extend":
-        if (!prev || prev.status !== "running") return { ok: false, error: "No running instance to extend." };
-        rec = { ...prev, expiresAt: (prev.expiresAt ?? now) + STUB_TTL_MS, updatedAt: now, note: "STUB — extended +2h (fake)." };
-        break;
+        return extendInstance(me.user.id, data.slug);
       case "stop":
-        if (!prev) return { ok: false, error: "No instance to stop." };
-        rec = { ...prev, status: "stopped", endpoint: null, expiresAt: null, updatedAt: now, note: "STUB — stopped (fake)." };
-        break;
+        return stopInstance(me.user.id, data.slug);
     }
-    await store.setInstance(rec);
-    return { ok: true, instance: rec };
   });
+
+/** Admin/diagnostic + cron/manual trigger: reap every expired instance. */
+export const reapInstances = createServerFn({ method: "POST" }).handler(async (): Promise<{
+  ok: boolean;
+  reaped: number;
+}> => {
+  const me = await requireUser();
+  if (me.user.role !== "ADMIN") throw new Error("FORBIDDEN");
+  return { ok: true, reaped: await reapExpiredInstances() };
+});
 
 // --- Admin / scoreboard ------------------------------------------------------
 
