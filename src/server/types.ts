@@ -79,6 +79,12 @@ export interface Challenge {
   category: "AI Red-Team" | "Active Directory" | "Web/API" | "Cloud" | "Kill-Chain";
   difficulty: Difficulty;
   author: string;
+  /**
+   * Optional instance lifetime in minutes from the challenge manifest (Phase 2
+   * content field). When absent the portal falls back to 120 minutes (2h).
+   * ONE 30-minute extension is allowed per instance (tracked via `extended`).
+   */
+  instanceTtlMinutes?: number;
   descriptionMd: string;
   objectives: string[];
   mitre: MitreRef[];
@@ -165,11 +171,17 @@ export interface InstanceRecord {
   userId: string;
   slug: string;
   status: InstanceStatus;
-  /** Fake endpoint for MVP — Phase 2 proxies the Range API contract. */
+  /** Endpoint(s) returned by the Range API — Phase 2 proxies the Range API contract. */
   endpoint: string | null;
   expiresAt: number | null;
   updatedAt: number;
   note: string;
+  /** Range API instance id (mock mints one; real infra returns one). */
+  rangeInstanceId?: string;
+  /** True once the single allowed +30min extension has been used. */
+  extended?: boolean;
+  /** Per-user DYNAMIC flag values minted by the mock — never shipped to the client. */
+  dynamicFlags?: Record<string, string>;
 }
 
 export interface SessionRecord {
@@ -258,6 +270,51 @@ export interface Store {
   // --- Security events ---
   recordSecurityEvent(ev: SecurityEvent): Promise<void>;
   listSecurityEvents(limit: number): Promise<SecurityEvent[]>;
+}
+
+// --- Scoring engine result types ---
+
+// ---------------------------------------------------------------------------
+// Range API contract (BRD §6). The portal NEVER touches Docker — every
+// instance control call goes through the external Range API. The mock-range
+// (src/server/mock-range.ts + dev middleware) implements this same contract so
+// local/dev runs need no real infra. These types are PURE (no node imports).
+// ---------------------------------------------------------------------------
+
+export interface RangeEndpoint {
+  /** Protocol/target label, e.g. "rdp", "ssh", "https". */
+  kind: string;
+  /** Hostname/IP the player dials, e.g. "10.13.37.10". */
+  host: string;
+  port: number;
+}
+
+export interface RangeProvisionRequest {
+  challenge_slug: string;
+  user_id: string;
+  ttl_minutes: number;
+}
+
+export interface RangeInstance {
+  instance_id: string;
+  challenge_slug: string;
+  user_id: string;
+  /** Status from the range's perspective ("running" | "stopped"). */
+  status: string;
+  endpoints: RangeEndpoint[];
+  /** Per-user flag values. DYNAMIC flags are minted server-side using the same
+   *  HMAC derivation as `dynamicFlagValue` in store.ts, so submissions match. */
+  flags: Array<{ flag_id: string; value: string }>;
+  /** Epoch ms at which the range auto-tears the instance down. */
+  expires_at: number;
+}
+
+export interface RangeApi {
+  provision(req: RangeProvisionRequest): Promise<RangeInstance>;
+  get(instanceId: string): Promise<RangeInstance>;
+  extend(instanceId: string): Promise<RangeInstance>;
+  destroy(instanceId: string): Promise<{ ok: boolean }>;
+  reset(instanceId: string): Promise<RangeInstance>;
 }
 
 // --- Scoring engine result types ---
