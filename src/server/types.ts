@@ -293,6 +293,20 @@ export interface HintUnlock {
 
 export type InstanceStatus = "running" | "stopped";
 
+/**
+ * In-process lab access payload (REAL playable labs). For labs whose target is
+ * served by the portal itself (e.g. the Invoice Inspector BOLA API at
+ * /api/labs/invoice), the provisioned instance carries the live base URL and
+ * the player's bearer token so the UI can hand the operator a real target to
+ * point Burp/curl at. `baseUrl` is origin-relative — the client resolves it
+ * against `location.origin` so both the dev and published hosts work.
+ * Deliberately player-visible: the token is the lab credential, not a secret.
+ */
+export interface LabAccess {
+  baseUrl: string;
+  token: string;
+}
+
 export interface InstanceRecord {
   userId: string;
   slug: string;
@@ -308,6 +322,9 @@ export interface InstanceRecord {
   extended?: boolean;
   /** Per-user DYNAMIC flag values minted by the mock — never shipped to the client. */
   dynamicFlags?: Record<string, string>;
+  /** Live in-process lab target (base URL + bearer token). Present only for
+   *  labs provisioned by `~/server/labs` (e.g. bola-invoice-api). */
+  lab?: LabAccess;
 }
 
 export interface SessionRecord {
