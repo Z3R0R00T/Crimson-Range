@@ -14,6 +14,35 @@ import handler from "./dist/server/server.js";
 // the built server. Disabled in prod via ENABLE_MOCK_RANGE=0.
 import { mockRange } from "./src/server/mock-range";
 
+// ---------------------------------------------------------------------------
+// Security headers (hardening). Applied to EVERY response from this production
+// server (mock-range, static assets, SSR). The dev server (vite.config.ts)
+// INTENTIONALLY omits HSTS and CSP: HSTS would pin the local dev host, and a
+// dev CSP adds no protection while getting in the way of Vite HMR — the full
+// set ships only here, in the production server. To verify with curl, run this
+// server (bun run build && bun run start) or the built preview; the dev server
+// at vite:3000 will NOT show these headers by design.
+// NOTE: the TanStack Start SSR HTML embeds inline scripts/styles, so the CSP
+// uses 'unsafe-inline' for script-src/style-src (baseline, no per-request
+// nonce in MVP) while still blocking object/embed, framing, and mixed content.
+// HSTS is harmless behind the TLS-terminating proxy and required for prod.
+// ---------------------------------------------------------------------------
+export const SECURITY_HEADERS: Record<string, string> = {
+  "content-security-policy":
+    "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; upgrade-insecure-requests",
+  "strict-transport-security": "max-age=31536000; includeSubDomains",
+  "x-frame-options": "DENY",
+  "x-content-type-options": "nosniff",
+  "referrer-policy": "same-origin",
+  "permissions-policy": "camera=(), microphone=(), geolocation=()",
+};
+
+export function withSecurityHeaders(res: Response): Response {
+  const h = new Headers(res.headers);
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) h.set(k, v);
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+}
+
 const mockRangeHandler = async (req: Request): Promise<Response | null> => {
   const { pathname } = new URL(req.url);
   if (!pathname.startsWith("/mock-range")) return null;
@@ -57,13 +86,15 @@ for (let attempt = 1; ; attempt++) {
       hostname: HOST,
       async fetch(req) {
         const mock = await mockRangeHandler(req);
-        if (mock) return mock;
+        if (mock) return withSecurityHeaders(mock);
         const { pathname } = new URL(req.url);
         if (pathname !== "/") {
           const file = Bun.file(CLIENT_DIR + pathname);
-          if (await file.exists()) return new Response(file);
+          if (await file.exists()) return withSecurityHeaders(new Response(file));
         }
-        return (handler as { fetch: (r: Request) => Response | Promise<Response> }).fetch(req);
+        return withSecurityHeaders(
+          await (handler as { fetch: (r: Request) => Response | Promise<Response> }).fetch(req)
+        );
       },
     });
     break;
