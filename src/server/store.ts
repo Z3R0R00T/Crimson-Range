@@ -16,6 +16,7 @@ import path from "node:path";
 import type {
   AnalyticsOverview,
   AnalyticsRow,
+  AuditEntry,
   AuthorChallengeMeta,
   CategoryPoints,
   Challenge,
@@ -71,6 +72,7 @@ export type {
   AnalyticsOverview,
   AnalyticsRow,
   Artifact,
+  AuditEntry,
   AuthorChallengeMeta,
   CategoryPoints,
   Challenge,
@@ -547,6 +549,8 @@ const RATE_LIMIT_MAX = 10; // submissions per challenge per user per 60s
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const BRUTE_FORCE_MAX = 8; // wrong submissions in 5 min
 const BRUTE_FORCE_WINDOW_MS = 5 * 60_000;
+/** Audit-log cap: oldest entries trimmed past this (keeps crimson.json small). */
+const AUDIT_CAP = 500;
 
 class JsonFileStore implements Store {
   private state: PersistedState | null = null;
@@ -565,6 +569,7 @@ class JsonFileStore implements Store {
         instances: Array.isArray(parsed.instances) ? parsed.instances : [],
         securityEvents: Array.isArray(parsed.securityEvents) ? parsed.securityEvents : [],
         attempts: Array.isArray(parsed.attempts) ? parsed.attempts : [],
+        auditLog: Array.isArray(parsed.auditLog) ? parsed.auditLog : [],
       };
     } catch {
       // First run (or unreadable file): seed runtime state. neo has fully
@@ -581,6 +586,7 @@ class JsonFileStore implements Store {
         instances: [],
         securityEvents: [],
         attempts: [],
+        auditLog: [],
       };
       await this.persist(this.state);
     }
@@ -957,6 +963,19 @@ class JsonFileStore implements Store {
   async listSecurityEvents(limit: number): Promise<SecurityEvent[]> {
     const s = await this.load();
     return [...s.securityEvents].sort((a, b) => b.at - a.at).slice(0, limit);
+  }
+
+  async recordAudit(entry: AuditEntry): Promise<void> {
+    const s = await this.load();
+    s.auditLog.push(entry);
+    // Bounded trail: trim oldest past the cap so crimson.json stays small.
+    if (s.auditLog.length > AUDIT_CAP) s.auditLog.splice(0, s.auditLog.length - AUDIT_CAP);
+    await this.persist(s);
+  }
+
+  async listAudit(limit: number): Promise<AuditEntry[]> {
+    const s = await this.load();
+    return [...s.auditLog].sort((a, b) => b.at - a.at).slice(0, Math.max(0, limit));
   }
 }
 

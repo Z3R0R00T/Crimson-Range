@@ -65,6 +65,13 @@ function mockRangeMiddleware(): {
   };
 }
 
+// Security headers: the DEV server intentionally omits HSTS and CSP.
+// HSTS would pin the local dev host (and is a prod-only concern behind the
+// TLS proxy), and a dev CSP adds no protection while getting in the way of
+// Vite HMR (inline scripts / ws). The full set ships ONLY in the production
+// server (serve.ts SECURITY_HEADERS, applied to every response) — verify with
+// `bun run build && bun run start`, not against vite :3000.
+
 export default defineConfig({
   server: {
     port: 3000,
@@ -91,6 +98,7 @@ export default defineConfig({
     },
   },
   plugins: [
+    // (security headers deliberately NOT here — see comment above; prod only)
     mockRangeMiddleware(),
     tailwindcss(),
     tsConfigPaths({

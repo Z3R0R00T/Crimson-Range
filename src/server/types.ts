@@ -318,7 +318,6 @@ export interface SessionRecord {
 }
 
 export type SecurityEventType = "SHARING_SUSPECTED" | "BRUTEFORCE_SUSPECTED" | "NEW_IP_MID_SOLVE";
-
 export interface SecurityEvent {
   type: SecurityEventType;
   userId: string;
@@ -350,6 +349,26 @@ export interface PersistedState {
   attempts: ChallengeAttempt[];
   /** Author-CMS challenges persisted at runtime (seeded fixtures stay in code). */
   customChallenges: Challenge[];
+  /** Admin/author action trail (hardening: audit log). Bounded in code (see store AUDIT_CAP). */
+  auditLog: AuditEntry[];
+}
+
+/**
+ * Audit-log entry (hardening). Records every ADMIN/author mutating action:
+ * CMS create/update/transition/signoff, reap, and failed auth events.
+ * NEVER carries flag values, passwords, or hashes — action + target only.
+ */
+export interface AuditEntry {
+  /** Epoch ms. */
+  at: number;
+  /** Username performing the action (or "anonymous" for failed logins). */
+  actor: string;
+  /** Stable verb, e.g. "cms.create", "cms.transition", "auth.login.failed". */
+  action: string;
+  /** Affected object, e.g. challenge slug or username. */
+  target: string;
+  /** Best-effort client IP (x-forwarded-for first hop), else null. */
+  ip: string | null;
 }
 
 /**
@@ -428,6 +447,12 @@ export interface Store {
   // --- Security events ---
   recordSecurityEvent(ev: SecurityEvent): Promise<void>;
   listSecurityEvents(limit: number): Promise<SecurityEvent[]>;
+
+  // --- Audit log (hardening) ---
+  /** Append an admin/author action entry (bounded; oldest trimmed past cap). */
+  recordAudit(entry: AuditEntry): Promise<void>;
+  /** Newest-first audit entries. */
+  listAudit(limit: number): Promise<AuditEntry[]>;
 }
 
 // --- Scoring engine result types ---
@@ -520,6 +545,8 @@ export interface AdminOverview {
   recent: AdminRecentRow[];
   events: SecurityEvent[];
   leaderboard: AdminLeaderboardRow[];
+  /** Newest-first admin/author action trail (hardening: audit log). */
+  audit: AuditEntry[];
 }
 
 // ---------------------------------------------------------------------------

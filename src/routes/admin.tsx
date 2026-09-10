@@ -2,7 +2,7 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { Shell, Card, useMe } from "~/components/shell";
 import { adminOverview, getMe } from "~/server/functions";
-import type { SafeUser, SecurityEvent } from "~/server/types";
+import type { AuditEntry, SafeUser, SecurityEvent } from "~/server/types";
 
 export const Route = createFileRoute("/admin")({
   component: Admin,
@@ -16,6 +16,7 @@ function Admin() {
     recent: Array<{ userId: string; username: string; challengeTitle: string; slug: string; flagId: string; at: number; pointsAwarded: number }>;
     events: SecurityEvent[];
     leaderboard: Array<{ userId: string; username: string; points: number }>;
+    audit: AuditEntry[];
   } | null>(null);
   const [denied, setDenied] = useState(false);
 
@@ -96,6 +97,25 @@ function Admin() {
               </div>
             </Card>
           </div>
+
+          {/* Audit log — ADMIN/author actions (hardening) */}
+          <Card className="p-5">
+            <h2 className="text-sm font-bold text-[#f0f3f8]">
+              audit log <span className="rounded border border-[#39d353]/60 px-1.5 text-[10px] text-[#39d353]">ADMIN</span>
+            </h2>
+            <div className="mt-2 space-y-1.5 text-xs">
+              {(data.audit ?? []).length === 0 && <p className="text-[#5a6a82]">no admin actions yet.</p>}
+              {(data.audit ?? []).slice(0, 20).map((a, i) => (
+                <div key={`${a.at}-${i}`} className="rounded border border-[#1d2532] bg-black/40 px-3 py-2">
+                  <span className="font-bold text-[#39d353]">{a.action}</span>
+                  <span className="ml-2 text-[#c9d4e3]">@{a.actor}</span>
+                  <span className="text-[#5a6a82]"> · {a.target}</span>
+                  <span className="text-[#3d4a5f]"> · ip {a.ip ?? "unknown"}</span>
+                  <div className="text-[10px] text-[#3d4a5f]">{new Date(a.at).toLocaleString()}</div>
+                </div>
+              ))}
+            </div>
+          </Card>
 
           {/* Security events — ADMIN only */}
           <Card className="p-5">
