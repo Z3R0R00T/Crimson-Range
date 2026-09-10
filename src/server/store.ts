@@ -375,15 +375,23 @@ Stub instance drops you on a Kali jump box in the lab VLAN with Impacket pre-ins
       category: "Web/API",
       difficulty: "Easy",
       author: "crimson-author",
+      instanceType: "kali+jumpbox",
+      instanceTtlMinutes: 120,
       descriptionMd: `## Brief
 
-Acme Billing exposes a v2 REST API for invoices at \`/api/v2/invoices/{id}\`. Your test account (\`pentest01 / Winter2026!\`) can see its own invoices just fine.
+Acme Billing runs a **live v2 REST API** for this engagement at \`/api/labs/invoice/v2\`. Start the instance and the panel below shows the resolved base URL plus your **bearer token**.
 
-Someone else's invoices are **also** visible. Find the broken object-level authorization, pivot to the admin export endpoint, and pull both flags.
+Authenticate with the seeded account \`pentest01 / Winter2026!\`:
 
-## Access
+\`curl -s -X POST <base>/auth/login -H "Content-Type: application/json" -d '{"username":"pentest01","password":"Winter2026!"}'\`
 
-Stub instance exposes the API at a fake endpoint below. Burp project file included in artifacts.`,
+Login returns a bearer token — send it on every other call:
+
+\`curl -s <base>/invoices -H "Authorization: Bearer <token>"\`
+
+Your test account can list its own invoices without issues. The service is fast, invoice IDs run **sequentially around #8990-#9010**, and the OpenAPI spec is published unauthenticated at \`/v2/openapi.json\`.
+
+Someone else's invoices are **also** readable. Find the broken object-level authorization, pivot to the admin export endpoint, and pull both flags. Recon notes + API spec are attached as artifacts — point Burp at the base URL, not the walkthrough.`,
       objectives: [
         "Enumerate invoice IDs and read another tenant's invoice (flag 1)",
         "Escalate to the admin-only export endpoint (flag 2)",
@@ -401,16 +409,16 @@ Stub instance exposes the API at a fake endpoint below. Burp project file includ
       ],
       hints: [
         { id: "h-1", title: "IDs are sequential", body: "Your invoices are #9001-#9007. What happens at #8999?", cost: 15 },
-        { id: "h-2", title: "Export takes a filter", body: "POST /api/v2/admin/export accepts a JSON filter including a 'role' field. The backend trusts it.", cost: 30 },
+        { id: "h-2", title: "Export takes a filter", body: "POST /v2/admin/export accepts a JSON body including a 'role' field. The backend trusts it.", cost: 30 },
       ],
       artifacts: [
-        { name: "acme-api-v2.yaml", kind: "API spec", size: "42 KB", url: "#stub" },
-        { name: "burp-project.burp", kind: "Burp file", size: "310 KB", url: "#stub" },
+        { name: "acme-api-v2.yaml", kind: "OpenAPI spec", size: "3 KB", url: "/api/labs/invoice/artifacts/acme-api-v2.yaml" },
+        { name: "recon-notes.txt", kind: "Recon notes", size: "1 KB", url: "/api/labs/invoice/artifacts/recon-notes.txt" },
       ],
       writeupMd: `## Solution — Invoice Inspector
 
-1. GET /api/v2/invoices/8999 with your own bearer token returns another tenant's invoice — no ownership check (BOLA). Flag 1 is in the \`notes\` field.
-2. POST /api/v2/admin/export with \`{"role":"admin"}\` bypasses the middleware check; export any invoice including the admin seed record holding flag 2.`,
+1. GET /v2/invoices/8999 with your own bearer token returns another tenant's invoice — no ownership check (BOLA). Flag 1 is in the \`notes\` field.
+2. POST /v2/admin/export with \`{"role":"admin"}\` bypasses the middleware check; export any invoice including the admin seed record holding flag 2.`,
     },
     {
       ...d(),

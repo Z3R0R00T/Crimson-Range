@@ -65,6 +65,52 @@ function mockRangeMiddleware(): {
   };
 }
 
+function labApiMiddleware(): {
+  name: string;
+  configureServer(server: {
+    middlewares: { use: (p: string, h: (req: Request, res: Response, next: () => void) => void) => void };
+    ssrLoadModule(url: string): Promise<Record<string, unknown>>;
+  }): void;
+} {
+  return {
+    name: "crimson-lab-api",
+    configureServer(server) {
+      server.middlewares.use("/api/labs/invoice", async (req, res, next) => {
+        try {
+          // Same pattern as mock-range: load via Vite's SSR module runner so
+          // `~` paths + node builtins resolve, then proxy the request.
+          const mod = (await server.ssrLoadModule("/src/server/labs/invoice-api.ts")) as unknown as {
+            invoiceApi: () => { handle(req: Request): Promise<Response> };
+          };
+          const body =
+            req.method === "GET" || req.method === "HEAD"
+              ? undefined
+              : await new Promise<string>((resolve, reject) => {
+                  const chunks: Buffer[] = [];
+                  req.on("data", (c: Buffer) => chunks.push(c));
+                  req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+                  req.on("error", reject);
+                });
+          const url = `${req.headers["x-forwarded-proto"] ?? "http"}://${req.headers.host ?? "localhost"}${req.url ?? ""}`;
+          const webReq = new Request(url, {
+            method: req.method,
+            headers: req.headers as Record<string, string>,
+            ...(body ? { body } : {}),
+          });
+          const webRes = await mod.invoiceApi().handle(webReq);
+          res.statusCode = webRes.status;
+          webRes.headers.forEach((v, k) => res.setHeader(k, v));
+          res.end(await webRes.text());
+        } catch (err) {
+          console.error("[lab-api] failed", err);
+          res.statusCode = 500;
+          res.end("lab api error");
+        }
+      });
+    },
+  };
+}
+
 // Security headers: the DEV server intentionally omits HSTS and CSP.
 // HSTS would pin the local dev host (and is a prod-only concern behind the
 // TLS proxy), and a dev CSP adds no protection while getting in the way of
@@ -100,6 +146,7 @@ export default defineConfig({
   plugins: [
     // (security headers deliberately NOT here — see comment above; prod only)
     mockRangeMiddleware(),
+    labApiMiddleware(),
     tailwindcss(),
     tsConfigPaths({
       projects: ["./tsconfig.json"],

@@ -126,7 +126,7 @@ function Detail() {
       const r = await instanceAction({ data: { slug, action } });
       if (r.ok && r.instance) {
         setInstance(r.instance);
-        setInstMsg(`[+] ${action} ok (stub)`);
+        setInstMsg(`[+] instance ${action} ok`);
       } else {
         setInstMsg(`[!] ${r.error ?? "action failed"}`);
       }
@@ -258,22 +258,41 @@ function Detail() {
               <Card className="p-5">
                 <h2 className="text-sm font-bold text-[#f0f3f8]">artifacts</h2>
                 <div className="mt-2 space-y-1.5 text-xs">
-                  {detail.artifacts.map((a) => (
-                    <div key={a.name} className="flex items-center gap-3 rounded border border-[#1d2532] bg-black/40 px-3 py-2">
-                      <span className="text-[#39d353]">↓</span>
-                      <span className="text-[#c9d4e3]">{a.name}</span>
-                      <span className="text-[#3d4a5f]">{a.kind} · {a.size}</span>
-                      <span className="ml-auto rounded border border-dashed border-[#2a3a4d] px-1.5 text-[10px] text-[#5a6a82]">stub</span>
-                    </div>
-                  ))}
+                  {detail.artifacts.map((a) =>
+                    a.url && a.url !== "#stub" ? (
+                      <a
+                        key={a.name}
+                        href={a.url}
+                        download
+                        className="flex items-center gap-3 rounded border border-[#1d2532] bg-black/40 px-3 py-2 text-[#c9d4e3] hover:border-[#39d353]/60 hover:text-[#39d353]"
+                      >
+                        <span className="text-[#39d353]">↓</span>
+                        <span>{a.name}</span>
+                        <span className="text-[#3d4a5f]">{a.kind} · {a.size}</span>
+                        <span className="ml-auto rounded border border-[#39d353]/40 px-1.5 text-[10px] text-[#39d353]">download</span>
+                      </a>
+                    ) : (
+                      <div key={a.name} className="flex items-center gap-3 rounded border border-[#1d2532] bg-black/40 px-3 py-2">
+                        <span className="text-[#39d353]">↓</span>
+                        <span className="text-[#c9d4e3]">{a.name}</span>
+                        <span className="text-[#3d4a5f]">{a.kind} · {a.size}</span>
+                        <span className="ml-auto rounded border border-dashed border-[#2a3a4d] px-1.5 text-[10px] text-[#5a6a82]">stub</span>
+                      </div>
+                    )
+                  )}
                 </div>
               </Card>
 
-              {/* Instance control panel (STUB) */}
+              {/* Instance control panel */}
               <Card className="p-5">
                 <div className="flex flex-wrap items-center gap-3">
                   <h2 className="text-sm font-bold text-[#f0f3f8]">
-                    instance <span className="rounded border border-dashed border-[#d29922]/60 px-1.5 text-[10px] text-[#d29922]">STUB</span>
+                    instance{" "}
+                    {instance?.lab ? (
+                      <span className="rounded border border-[#39d353]/60 px-1.5 text-[10px] text-[#39d353]">LIVE</span>
+                    ) : (
+                      <span className="rounded border border-dashed border-[#2a3a4d] px-1.5 text-[10px] text-[#5a6a82]">range</span>
+                    )}
                   </h2>
                   <span className="ml-auto text-xs">
                     {instance && instance.status === "running" && instance.expiresAt ? (
@@ -285,7 +304,32 @@ function Detail() {
                     )}
                   </span>
                 </div>
-                {instance?.endpoint && (
+                {instance?.lab && instance.status === "running" && (
+                  <div className="mt-2 space-y-1.5 rounded bg-black/60 px-3 py-2 text-[11px]">
+                    <p className="flex items-center gap-2 text-[#3d4a5f]">
+                      <span className="w-16 shrink-0 text-[#5a6a82]">api base</span>
+                      <code className="truncate text-[#39d353]">{`${window.location.origin}${instance.lab.baseUrl}`}</code>
+                      <button
+                        onClick={() => navigator.clipboard?.writeText(`${window.location.origin}${instance.lab?.baseUrl ?? ""}`)}
+                        className="ml-auto shrink-0 rounded border border-[#2a3a4d] px-1.5 text-[10px] text-[#8b98ac] hover:border-[#39d353] hover:text-[#39d353]"
+                      >
+                        copy
+                      </button>
+                    </p>
+                    <p className="flex items-center gap-2 text-[#3d4a5f]">
+                      <span className="w-16 shrink-0 text-[#5a6a82]">bearer</span>
+                      <code className="truncate text-[#39d353]">{instance.lab.token}</code>
+                      <button
+                        onClick={() => navigator.clipboard?.writeText(instance.lab?.token ?? "")}
+                        className="ml-auto shrink-0 rounded border border-[#2a3a4d] px-1.5 text-[10px] text-[#8b98ac] hover:border-[#39d353] hover:text-[#39d353]"
+                      >
+                        copy
+                      </button>
+                    </p>
+                    <p className="text-[#3d4a5f]">// Authorization: Bearer {"<token>"} — login with pentest01 / Winter2026! to mint your own</p>
+                  </div>
+                )}
+                {!instance?.lab && instance?.endpoint && (
                   <p className="mt-2 truncate rounded bg-black/60 px-3 py-2 text-[11px] text-[#39d353]">$ target --connect {instance.endpoint}</p>
                 )}
                 {instance?.note && <p className="mt-1 text-[11px] text-[#3d4a5f]">// {instance.note}</p>}

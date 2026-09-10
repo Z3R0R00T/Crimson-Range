@@ -20,7 +20,15 @@
 
 import { getStore, dynamicFlagValue } from "~/server/store";
 import { rangeClient, rangeUrl } from "~/server/range";
+// LIVE in-process labs: bola-invoice-api's instance carries the real API base
+// URL + bearer token (LabAccess) so the player gets a genuine target.
+import { labAccessFor } from "~/server/labs/invoice-api";
 import type { Challenge, InstanceRecord, RangeApi, RangeInstance } from "~/server/types";
+
+/** Challenges served in-process under /api/labs/<slug> get a LabAccess block. */
+const LABS_BY_SLUG: Record<string, (userId: string) => { baseUrl: string; token: string }> = {
+  "bola-invoice-api": labAccessFor,
+};
 
 /** Max simultaneously RUNNING instances per user (portal-enforced hard cap). */
 export const MAX_RUNNING_INSTANCES = 2;
@@ -145,6 +153,9 @@ async function runAction(
       const dyn: Record<string, string> = {};
       for (const f of challenge.flags) if (f.flagType === "DYNAMIC") dyn[f.id] = dynamicFlagValue(userId, slug, f.id);
       rec.dynamicFlags = dyn;
+      // LIVE in-process labs: attach the real target (base URL + bearer token).
+      const labFn = LABS_BY_SLUG[slug];
+      if (labFn) rec.lab = labFn(userId);
       const ok = await acquireSlot(userId, rec);
       if (!ok) {
         // Roll back the range provision so we do not leak a box we refuse.
@@ -161,7 +172,7 @@ async function runAction(
       if (!prev || prev.status !== "running") return { ok: false, error: "No running instance to reset." };
       if (!prev.rangeInstanceId) return { ok: false, error: "Instance has no range id." };
       const ri = await api.reset(prev.rangeInstanceId);
-      const rec: InstanceRecord = { ...toInstanceRecord(userId, slug, ri), dynamicFlags: prev.dynamicFlags, extended: prev.extended };
+      const rec: InstanceRecord = { ...toInstanceRecord(userId, slug, ri), dynamicFlags: prev.dynamicFlags, extended: prev.extended, lab: prev.lab };
       await s.setInstance(rec);
       return { ok: true, instance: publicInstance(rec) };
     }
@@ -170,7 +181,7 @@ async function runAction(
       if (prev.extended) return { ok: false, error: "Extension already used — one 30-minute extension per instance." };
       if (!prev.rangeInstanceId) return { ok: false, error: "Instance has no range id." };
       const ri = await api.extend(prev.rangeInstanceId);
-      const rec: InstanceRecord = { ...toInstanceRecord(userId, slug, ri), dynamicFlags: prev.dynamicFlags, extended: true };
+      const rec: InstanceRecord = { ...toInstanceRecord(userId, slug, ri), dynamicFlags: prev.dynamicFlags, extended: true, lab: prev.lab };
       await s.setInstance(rec);
       return { ok: true, instance: publicInstance(rec) };
     }
@@ -217,7 +228,7 @@ export async function readInstance(
   // Refresh from the range so TTL/status stay authoritative.
   try {
     const ri = await api.get(rec.rangeInstanceId);
-    const fresh: InstanceRecord = { ...toInstanceRecord(userId, slug, ri), dynamicFlags: rec.dynamicFlags, extended: rec.extended };
+    const fresh: InstanceRecord = { ...toInstanceRecord(userId, slug, ri), dynamicFlags: rec.dynamicFlags, extended: rec.extended, lab: rec.lab };
     await s.setInstance(fresh);
     return publicInstance(fresh);
   } catch {
