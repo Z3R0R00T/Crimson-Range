@@ -134,10 +134,11 @@ function parseToken(token: string): { ok: true; claims: TokenClaims } | { ok: fa
  * always the seeded demo user; tenant is the seeded demo tenant, so the token
  * the UI shows behaves exactly like the one a real login returns.
  */
-export function labAccessFor(userId: string): { baseUrl: string; token: string } {
+export function labAccessFor(userId: string): { baseUrl: string; token: string; hint?: string } {
   return {
     baseUrl: "/api/labs/invoice/v2",
     token: mintToken({ sub: DEMO_USER, tenant: DEMO_TENANT, role: "user", uid: userId }),
+    hint: '// Authorization: Bearer <token> — login with pentest01 / Winter2026! to mint your own',
   };
 }
 
