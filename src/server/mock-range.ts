@@ -37,9 +37,24 @@ function challengeFor(slug: string): Challenge | null {
   return c ?? null;
 }
 const challengesCache = new Map<string, Challenge>();
-void (async () => {
+async function fillChallengesCache(): Promise<void> {
   for (const c of await getStore().listChallenges()) challengesCache.set(c.slug, c);
-})();
+}
+void fillChallengesCache();
+
+/**
+ * Cache-first lookup that never races the background fill: the FIRST provision
+ * request after a server start used to arrive before the async fill finished and
+ * was rejected with `unknown challenge: <slug>` (HTTP 404), so the portal's
+ * "start instance" button silently failed on the first click. Provisioning now
+ * awaits a fill when the slug is missing from the cache.
+ */
+async function challengeForAsync(slug: string): Promise<Challenge | null> {
+  const cached = challengesCache.get(slug);
+  if (cached) return cached;
+  await fillChallengesCache();
+  return challengesCache.get(slug) ?? null;
+}
 
 function id(): string {
   return createHash("sha256").update(`${Date.now()}:${Math.random()}`).digest("hex").slice(0, 16);
@@ -128,7 +143,7 @@ export function mockRange(): {
       const userId = body.user_id;
       const ttl = typeof body.ttl_minutes === "number" && body.ttl_minutes > 0 ? Math.round(body.ttl_minutes) : 120;
       if (!slug || !userId) return json({ error: "challenge_slug and user_id required" }, 400);
-      const c = challengeFor(slug);
+      const c = await challengeForAsync(slug);
       if (!c) return json({ error: `unknown challenge: ${slug}` }, 404);
       const createdAt = now();
       const inst: MockInstance = {

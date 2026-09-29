@@ -23,11 +23,15 @@ import { rangeClient, rangeUrl } from "~/server/range";
 // LIVE in-process labs: bola-invoice-api's instance carries the real API base
 // URL + bearer token (LabAccess) so the player gets a genuine target.
 import { labAccessFor } from "~/server/labs/invoice-api";
+// prompt-injection-payroll (Payroll Whisperer): the PayBuddy chat sim mints the
+// per-player bearer token at instance start (base URL + token).
+import { paybuddyLabAccess } from "~/server/labs/paybuddy-api";
 import type { Challenge, InstanceRecord, RangeApi, RangeInstance } from "~/server/types";
 
 /** Challenges served in-process under /api/labs/<slug> get a LabAccess block. */
 const LABS_BY_SLUG: Record<string, (userId: string) => { baseUrl: string; token: string }> = {
   "bola-invoice-api": labAccessFor,
+  "prompt-injection-payroll": paybuddyLabAccess,
 };
 
 /** Max simultaneously RUNNING instances per user (portal-enforced hard cap). */

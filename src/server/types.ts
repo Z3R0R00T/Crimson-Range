@@ -305,6 +305,9 @@ export type InstanceStatus = "running" | "stopped";
 export interface LabAccess {
   baseUrl: string;
   token: string;
+  /** Short one-line usage hint rendered under the token in the instance panel
+   *  (e.g. which header/body the target expects). Optional. */
+  hint?: string;
 }
 
 export interface InstanceRecord {

@@ -326,7 +326,7 @@ function Detail() {
                         copy
                       </button>
                     </p>
-                    <p className="text-[#3d4a5f]">// Authorization: Bearer {"<token>"} — login with pentest01 / Winter2026! to mint your own</p>
+                    <p className="break-words text-[#3d4a5f]">{instance.lab?.hint ?? "// Authorization: Bearer <token>"}</p>
                   </div>
                 )}
                 {!instance?.lab && instance?.endpoint && (

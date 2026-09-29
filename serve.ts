@@ -13,10 +13,13 @@ import handler from "./dist/server/server.js";
 // handler lives in ./src/server/mock-range.ts; this is the transport shim for
 // the built server. Disabled in prod via ENABLE_MOCK_RANGE=0.
 import { mockRange } from "./src/server/mock-range";
-// LIVE in-process lab target (Invoice Inspector BOLA API). Served by the
-// production build exactly like the dev middleware serves it, so the lab stays
-// reachable on the published site. Handler lives in ./src/server/labs.
-import { invoiceApi } from "./src/server/labs/invoice-api";
+// NOTE: the live lab targets (/api/labs/invoice..., /api/labs/paybuddy...) are
+// NOT mounted here any more. They are real TanStack Start API routes
+// (src/routes/api/labs/*/$), so they are part of the built SSR handler
+// (dist/server/server.js) and reachable on the published site without a
+// separate transport shim. One mount point, one implementation: the lab logic
+// lives in ./src/server/labs/* and every server path (vite dev, serve.ts,
+// the Vercel-style entry) reaches it through the route tree.
 
 // ---------------------------------------------------------------------------
 // Security headers (hardening). Applied to EVERY response from this production
@@ -58,13 +61,6 @@ const mockRangeHandler = async (req: Request): Promise<Response | null> => {
   }
   return mockRange().handle(req);
 };
-// Live lab targets (/api/labs/invoice...) — same in-process handlers the dev
-// middleware serves, reachable on the production build too.
-const labApiHandler = async (req: Request): Promise<Response | null> => {
-  const { pathname } = new URL(req.url);
-  if (!pathname.startsWith("/api/labs/invoice")) return null;
-  return invoiceApi().handle(req);
-};
 
 // Pinned, NOT read from the environment. The published preview URL
 // (<label>.<PUBLIC_SITE_DOMAIN>) is reverse-proxied to 0.0.0.0:3000 inside the
@@ -98,8 +94,6 @@ for (let attempt = 1; ; attempt++) {
       async fetch(req) {
         const mock = await mockRangeHandler(req);
         if (mock) return withSecurityHeaders(mock);
-        const lab = await labApiHandler(req);
-        if (lab) return withSecurityHeaders(lab);
         const { pathname } = new URL(req.url);
         if (pathname !== "/") {
           const file = Bun.file(CLIENT_DIR + pathname);
